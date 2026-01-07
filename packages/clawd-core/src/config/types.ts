@@ -2,7 +2,7 @@
  * Clawd Core Configuration Types
  */
 
-export type ThinkLevel = "off" | "low" | "medium" | "high";
+export type ThinkLevel = "off" | "minimal" | "low" | "medium" | "high";
 export type VerboseLevel = "on" | "off";
 
 export type SessionScope = "per-sender" | "global";

@@ -11,6 +11,8 @@ import {
 import type { ClawdConfig, ThinkLevel } from "../config/types.js";
 import { createBashTool, createProcessTool } from "../tools/bash-tools.js";
 import { resolveUserPath } from "../utils/index.js";
+import { extractAllDirectives } from "./directives.js";
+import { buildMemoryContextFiles, loadDailyMemoryLogs } from "./memory.js";
 import {
   getOrCreateSession,
   loadSessionStore,
@@ -44,6 +46,10 @@ export type AgentRunnerParams = {
   onToolResult?: (name: string, result: unknown) => void;
   /** Abort signal */
   signal?: AbortSignal;
+  /** Whether to load daily memory logs (default: true) */
+  loadMemoryLogs?: boolean;
+  /** Whether to extract inline directives from message (default: true) */
+  extractDirectives?: boolean;
 };
 
 export type AgentRunnerResult = {
@@ -61,12 +67,20 @@ export type AgentRunnerResult = {
   };
   /** Model used */
   model?: string;
+  /** Extracted directives from the message */
+  directives?: {
+    thinkLevel?: string;
+    verboseLevel?: string;
+    hasDirectives: boolean;
+  };
 };
 
 function mapThinkingLevel(
   level?: ThinkLevel,
 ): "off" | "low" | "medium" | "high" {
   if (!level || level === "off") return "off";
+  // Map "minimal" to "low" since the SDK only supports off/low/medium/high
+  if (level === "minimal") return "low";
   return level;
 }
 
@@ -77,8 +91,16 @@ function mapThinkingLevel(
 export async function runClawdAgent(
   params: AgentRunnerParams,
 ): Promise<AgentRunnerResult> {
-  const { message, config, signal, onTextChunk, onToolUse, onToolResult } =
-    params;
+  const { config, signal, onTextChunk, onToolUse, onToolResult } = params;
+
+  // Extract inline directives from message (e.g., /think high, /verbose on)
+  const shouldExtractDirectives = params.extractDirectives !== false;
+  const directives = shouldExtractDirectives
+    ? extractAllDirectives(params.message)
+    : { cleanedMessage: params.message, hasDirectives: false };
+
+  // Use cleaned message (directives removed)
+  const message = directives.cleanedMessage;
 
   // Resolve workspace
   const workspaceDir = config?.agent?.workspace
@@ -89,7 +111,19 @@ export async function runClawdAgent(
 
   // Load workspace files (AGENTS.md, IDENTITY.md, etc.)
   const bootstrapFiles = await loadWorkspaceBootstrapFiles(workspaceDir);
-  const contextFiles = buildBootstrapContextFiles(bootstrapFiles);
+  const bootstrapContextFiles = buildBootstrapContextFiles(bootstrapFiles);
+
+  // Load daily memory logs (today + yesterday)
+  const shouldLoadMemory = params.loadMemoryLogs !== false;
+  const memoryLogs = shouldLoadMemory
+    ? await loadDailyMemoryLogs(workspaceDir)
+    : null;
+  const memoryContextFiles = memoryLogs
+    ? buildMemoryContextFiles(memoryLogs)
+    : [];
+
+  // Combine all context files
+  const contextFiles = [...bootstrapContextFiles, ...memoryContextFiles];
 
   // Load skills from workspace
   const skillEntries = loadWorkspaceSkillEntries(workspaceDir, { config });
@@ -130,10 +164,12 @@ export async function runClawdAgent(
     // Discover skills using pi-coding-agent's discovery
     const skills = discoverSkills(workspaceDir);
 
-    // Build thinking level
-    const thinkingLevel = mapThinkingLevel(
-      params.thinkingLevel ?? (config?.agent?.thinking as ThinkLevel),
-    );
+    // Build thinking level (directive > param > config)
+    const effectiveThinkLevel =
+      directives.thinkLevel ??
+      params.thinkingLevel ??
+      (config?.agent?.thinking as ThinkLevel);
+    const thinkingLevel = mapThinkingLevel(effectiveThinkLevel);
 
     // Build custom system prompt append
     const systemPromptAppend = buildAgentSystemPromptAppend({
@@ -264,6 +300,13 @@ export async function runClawdAgent(
       sessionId,
       sessionKey,
       model: modelName,
+      directives: directives.hasDirectives
+        ? {
+            thinkLevel: directives.thinkLevel,
+            verboseLevel: directives.verboseLevel,
+            hasDirectives: true,
+          }
+        : undefined,
     };
   } finally {
     cleanupEnv();

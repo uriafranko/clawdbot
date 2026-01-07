@@ -1,3 +1,7 @@
+export * from "./directives.js";
+export * from "./heartbeat.js";
+export * from "./memory.js";
+export * from "./model-fallback.js";
 export * from "./runner.js";
 export * from "./sessions.js";
 export * from "./skills.js";
