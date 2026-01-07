@@ -1,0 +1,41 @@
+{
+  "name": "clawd-core",
+  "version": "0.1.0",
+  "description": "Standalone Clawd agent core - workspace, skills, and agent loop",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "clawd": "dist/cli/entry.js"
+  },
+  "files": [
+    "dist/**",
+    "skills/**",
+    "templates/**"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli/entry.ts",
+    "build": "tsc -p tsconfig.json",
+    "clawd": "tsx src/cli/entry.ts",
+    "lint": "biome check src",
+    "test": "vitest"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.37.2",
+    "@mariozechner/pi-ai": "^0.37.2",
+    "@mariozechner/pi-coding-agent": "^0.37.2",
+    "@sinclair/typebox": "0.34.46",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.2",
+    "json5": "^2.2.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.11",
+    "@types/node": "^25.0.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
+  }
+}
