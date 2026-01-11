@@ -251,8 +251,8 @@ Controls how WhatsApp direct chats (DMs) are handled:
 Pairing codes expire after 1 hour; the bot only sends a pairing code when a new request is created. Pending DM pairing requests are capped at **3 per provider** by default.
 
 Pairing approvals:
-- `clawdbot pairing list --provider whatsapp`
-- `clawdbot pairing approve --provider whatsapp <code>`
+- `clawdbot pairing list whatsapp`
+- `clawdbot pairing approve whatsapp <code>`
 
 ### `whatsapp.allowFrom`
 
@@ -342,6 +342,8 @@ Group messages default to **require mention** (either metadata mention or regex 
   }
 }
 ```
+
+`messages.groupChat.historyLimit` sets the global default for group history context. Providers can override with `<provider>.historyLimit` (or `<provider>.accounts.*.historyLimit` for multi-account). Set `0` to disable history wrapping.
 
 Per-agent override (takes precedence when set, even `[]`):
 ```json5
@@ -612,6 +614,8 @@ Controls how chat commands are enabled across connectors.
   commands: {
     native: false,          // register native commands when supported
     text: true,             // parse slash commands in chat messages
+    config: false,          // allow /config (writes to disk)
+    debug: false,           // allow /debug (runtime-only overrides)
     restart: false,         // allow /restart + gateway restart tool
     useAccessGroups: true   // enforce access-group allowlists/policies for commands
   }
@@ -623,6 +627,8 @@ Notes:
 - `commands.text: false` disables parsing chat messages for commands.
 - `commands.native: true` registers native commands on supported connectors (Discord/Slack/Telegram). Platforms without native commands still rely on text commands.
 - `commands.native: false` skips native registration; Discord/Telegram clear previously registered commands on startup. Slack commands are managed in the Slack app.
+- `commands.config: true` enables `/config` (reads/writes `clawdbot.json`).
+- `commands.debug: true` enables `/debug` (runtime-only overrides).
 - `commands.restart: true` enables `/restart` and the gateway tool restart action.
 - `commands.useAccessGroups: false` allows commands to bypass access-group allowlists/policies.
 
@@ -674,8 +680,14 @@ Multi-account support lives under `telegram.accounts` (see the multi-account sec
         }
       }
     },
+    historyLimit: 50,                     // include last N group messages as context (0 disables)
     replyToMode: "first",                 // off | first | all
     streamMode: "partial",               // off | partial | block (draft streaming; separate from block streaming)
+    draftChunk: {                        // optional; only for streamMode=block
+      minChars: 200,
+      maxChars: 800,
+      breakPreference: "paragraph"       // paragraph | newline | sentence
+    },
     actions: { reactions: true, sendMessage: true }, // tool action gates (false disables)
     mediaMaxMb: 5,
     retry: {                             // outbound retry policy
@@ -803,6 +815,7 @@ Slack runs in Socket Mode and requires both a bot token and app token:
         systemPrompt: "Short answers only."
       }
     },
+    historyLimit: 50,          // include last N channel/group messages as context (0 disables)
     allowBots: false,
     reactionNotifications: "own", // off | own | all | allowlist
     reactionAllowlist: ["U123"],
@@ -855,7 +868,8 @@ Signal reactions can emit system events (shared reaction tooling):
 {
   signal: {
     reactionNotifications: "own", // off | own | all | allowlist
-    reactionAllowlist: ["+15551234567", "uuid:123e4567-e89b-12d3-a456-426614174000"]
+    reactionAllowlist: ["+15551234567", "uuid:123e4567-e89b-12d3-a456-426614174000"],
+    historyLimit: 50 // include last N group messages as context (0 disables)
   }
 }
 ```
@@ -878,6 +892,7 @@ Clawdbot spawns `imsg rpc` (JSON-RPC over stdio). No daemon or port required.
     dbPath: "~/Library/Messages/chat.db",
     dmPolicy: "pairing", // pairing | allowlist | open | disabled
     allowFrom: ["+15555550123", "user@example.com", "chat_id:123"],
+    historyLimit: 50,    // include last N group messages as context (0 disables)
     includeAttachments: false,
     mediaMaxMb: 16,
     service: "auto",
@@ -1026,6 +1041,46 @@ is already present in `agents.defaults.models`:
 - `gemini-flash` -> `google/gemini-3-flash-preview`
 
 If you configure the same alias name (case-insensitive) yourself, your value wins (defaults never override).
+
+#### `agents.defaults.cliBackends` (CLI fallback)
+
+Optional CLI backends for text-only fallback runs (no tool calls). These are useful as a
+backup path when API providers fail. Image pass-through is supported when you configure
+an `imageArg` that accepts file paths.
+
+Notes:
+- CLI backends are **text-first**; tools are always disabled.
+- Sessions are supported when `sessionArg` is set; session ids are persisted per backend.
+- For `claude-cli`, defaults are wired in. Override the command path if PATH is minimal
+  (launchd/systemd).
+
+Example:
+
+```json5
+{
+  agents: {
+    defaults: {
+      cliBackends: {
+        "claude-cli": {
+          command: "/opt/homebrew/bin/claude"
+        },
+        "my-cli": {
+          command: "my-cli",
+          args: ["--json"],
+          output: "json",
+          modelArg: "--model",
+          sessionArg: "--session",
+          sessionMode: "existing",
+          systemPromptArg: "--system",
+          systemPromptWhen: "first",
+          imageArg: "--image",
+          imageMode: "repeat"
+        }
+      }
+    }
+  }
+}
+```
 
 ```json5
 {
@@ -1186,6 +1241,15 @@ Block streaming:
   Provider overrides: `whatsapp.blockStreamingCoalesce`, `telegram.blockStreamingCoalesce`,
   `discord.blockStreamingCoalesce`, `slack.blockStreamingCoalesce`, `signal.blockStreamingCoalesce`,
   `imessage.blockStreamingCoalesce`, `msteams.blockStreamingCoalesce` (and per-account variants).
+- `agents.defaults.humanDelay`: randomized pause between **block replies** after the first.
+  Modes: `off` (default), `natural` (800–2500ms), `custom` (use `minMs`/`maxMs`).
+  Per-agent override: `agents.list[].humanDelay`.
+  Example:
+  ```json5
+  {
+    agents: { defaults: { humanDelay: { mode: "natural" } } }
+  }
+  ```
 See [/concepts/streaming](/concepts/streaming) for behavior + chunking details.
 
 Typing indicators:
@@ -1207,6 +1271,7 @@ Z.AI models are available as `zai/<model>` (e.g. `zai/glm-4.7`) and require
 - `every`: duration string (`ms`, `s`, `m`, `h`); default unit minutes. Default:
   `30m`. Set `0m` to disable.
 - `model`: optional override model for heartbeat runs (`provider/model`).
+- `includeReasoning`: when `true`, heartbeats will also deliver the separate `Reasoning:` message when available (same shape as `/reasoning on`). Default: `false`.
 - `target`: optional delivery provider (`last`, `whatsapp`, `telegram`, `discord`, `slack`, `signal`, `imessage`, `none`). Default: `last`.
 - `to`: optional recipient override (provider-specific id, e.g. E.164 for WhatsApp, chat id for Telegram).
 - `prompt`: optional override for the heartbeat body (default: `Read HEARTBEAT.md if exists. Consider outstanding tasks. Checkup sometimes on your human during (user local) day time.`). Overrides are sent verbatim; include a `Read HEARTBEAT.md if exists` line if you still want the file read.
@@ -1355,6 +1420,10 @@ Legacy: `perSession` is still supported (`true` → `scope: "session"`,
           noVncPort: 6080,
           headless: false,
           enableNoVnc: true,
+          allowHostControl: false,
+          allowedControlUrls: ["http://10.0.0.42:18791"],
+          allowedControlHosts: ["browser.lab.local", "10.0.0.42"],
+          allowedControlPorts: [18791],
           autoStart: true,
           autoStartTimeoutMs: 12000
         },
@@ -1397,12 +1466,24 @@ the noVNC URL is injected into the system prompt so the agent can reference it.
 This does not require `browser.enabled` in the main config; the sandbox control
 URL is injected per session.
 
+`agents.defaults.sandbox.browser.allowHostControl` (default: false) allows
+sandboxed sessions to explicitly target the **host** browser control server
+via the browser tool (`target: "host"`). Leave this off if you want strict
+sandbox isolation.
+
+Allowlists for remote control:
+- `allowedControlUrls`: exact control URLs permitted for `target: "custom"`.
+- `allowedControlHosts`: hostnames permitted (hostname only, no port).
+- `allowedControlPorts`: ports permitted (defaults: http=80, https=443).
+Defaults: all allowlists are unset (no restriction). `allowHostControl` defaults to false.
+
 ### `models` (custom providers + base URLs)
 
 Clawdbot uses the **pi-coding-agent** model catalog. You can add custom providers
 (LiteLLM, local OpenAI-compatible servers, Anthropic proxies, etc.) by writing
 `~/.clawdbot/agents/<agentId>/agent/models.json` or by defining the same schema inside your
 Clawdbot config under `models.providers`.
+Provider-by-provider overview + examples: [/concepts/model-providers](/concepts/model-providers).
 
 When `models.providers` is present, Clawdbot writes/merges a `models.json` into
 `~/.clawdbot/agents/<agentId>/agent/` on startup:
@@ -1447,10 +1528,12 @@ Select the model via `agents.defaults.model.primary` (provider/model).
 
 ### OpenCode Zen (multi-model proxy)
 
-OpenCode Zen is an OpenAI-compatible proxy at `https://opencode.ai/zen/v1`. Get an API key at https://opencode.ai/auth and set `OPENCODE_ZEN_API_KEY`.
+OpenCode Zen is a multi-model gateway with per-model endpoints. Clawdbot uses
+the built-in `opencode` provider from pi-ai; set `OPENCODE_API_KEY` (or
+`OPENCODE_ZEN_API_KEY`) from https://opencode.ai/auth.
 
 Notes:
-- Model refs use `opencode-zen/<modelId>` (example: `opencode-zen/claude-opus-4-5`).
+- Model refs use `opencode/<modelId>` (example: `opencode/claude-opus-4-5`).
 - If you enable an allowlist via `agents.defaults.models`, add each model you plan to use.
 - Shortcut: `clawdbot onboard --auth-choice opencode-zen`.
 
@@ -1458,29 +1541,8 @@ Notes:
 {
   agents: {
     defaults: {
-      model: { primary: "opencode-zen/claude-opus-4-5" },
-      models: { "opencode-zen/claude-opus-4-5": { alias: "Opus" } }
-    }
-  },
-  models: {
-    mode: "merge",
-    providers: {
-      "opencode-zen": {
-        baseUrl: "https://opencode.ai/zen/v1",
-        apiKey: "${OPENCODE_ZEN_API_KEY}",
-        api: "openai-completions",
-        models: [
-          {
-            id: "claude-opus-4-5",
-            name: "Claude Opus 4.5",
-            reasoning: true,
-            input: ["text", "image"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 200000,
-            maxTokens: 32000
-          }
-        ]
-      }
+      model: { primary: "opencode/claude-opus-4-5" },
+      models: { "opencode/claude-opus-4-5": { alias: "Opus" } }
     }
   }
 }
@@ -1490,6 +1552,8 @@ Notes:
 
 Z.AI models are available via the built-in `zai` provider. Set `ZAI_API_KEY`
 in your environment and reference the model by provider/model.
+
+Shortcut: `clawdbot onboard --auth-choice zai-api-key`.
 
 ```json5
 {
@@ -1711,6 +1775,44 @@ Example:
 }
 ```
 
+### `plugins` (extensions)
+
+Controls plugin discovery, allow/deny, and per-plugin config. Plugins are loaded
+from `~/.clawdbot/extensions`, `<workspace>/.clawdbot/extensions`, plus any
+`plugins.load.paths` entries. **Config changes require a gateway restart.**
+See [/plugin](/plugin) for full usage.
+
+Fields:
+- `enabled`: master toggle for plugin loading (default: true).
+- `allow`: optional allowlist of plugin ids; when set, only listed plugins load.
+- `deny`: optional denylist of plugin ids (deny wins).
+- `load.paths`: extra plugin files or directories to load (absolute or `~`).
+- `entries.<pluginId>`: per-plugin overrides.
+  - `enabled`: set `false` to disable.
+  - `config`: plugin-specific config object (validated by the plugin if provided).
+
+Example:
+
+```json5
+{
+  plugins: {
+    enabled: true,
+    allow: ["voice-call"],
+    load: {
+      paths: ["~/Projects/oss/voice-call-extension"]
+    },
+    entries: {
+      "voice-call": {
+        enabled: true,
+        config: {
+          provider: "twilio"
+        }
+      }
+    }
+  }
+}
+```
+
 ### `browser` (clawd-managed Chrome)
 
 Clawdbot can start a **dedicated, isolated** Chrome/Chromium instance for clawd and expose a small loopback control server.
@@ -1779,7 +1881,7 @@ Defaults:
     port: 18789, // WS + HTTP multiplex
     bind: "loopback",
     // controlUi: { enabled: true, basePath: "/clawdbot" }
-    // auth: { mode: "token", token: "your-token" } // token is for multi-machine CLI access
+    // auth: { mode: "token", token: "your-token" } // token gates WS + Control UI access
     // tailscale: { mode: "off" | "serve" | "funnel" }
   }
 }
@@ -1799,8 +1901,10 @@ Related docs:
 Notes:
 - `clawdbot gateway` refuses to start unless `gateway.mode` is set to `local` (or you pass the override flag).
 - `gateway.port` controls the single multiplexed port used for WebSocket + HTTP (control UI, hooks, A2UI).
+- OpenAI Chat Completions endpoint: **disabled by default**; enable with `gateway.http.endpoints.chatCompletions.enabled: true`.
 - Precedence: `--port` > `CLAWDBOT_GATEWAY_PORT` > `gateway.port` > default `18789`.
 - Non-loopback binds (`lan`/`tailnet`/`auto`) require auth. Use `gateway.auth.token` (or `CLAWDBOT_GATEWAY_TOKEN`).
+- The onboarding wizard generates a gateway token by default (even on loopback).
 - `gateway.remote.token` is **only** for remote CLI calls; it does not enable local gateway auth. `gateway.token` is ignored.
 
 Auth and Tailscale:
@@ -1876,6 +1980,7 @@ Requires full Gateway restart:
 - `bridge`
 - `discovery`
 - `canvasHost`
+- `plugins`
 - Any unknown/unsupported config path (defaults to restart for safety)
 
 ### Multi-instance isolation
@@ -1890,7 +1995,7 @@ Convenience flags (CLI):
 - `clawdbot --dev …` → uses `~/.clawdbot-dev` + shifts ports from base `19001`
 - `clawdbot --profile <name> …` → uses `~/.clawdbot-<name>` (port via config/env/flags)
 
-See [`docs/gateway.md`](/gateway) for the derived port mapping (gateway/bridge/browser/canvas).
+See [Gateway runbook](/gateway) for the derived port mapping (gateway/bridge/browser/canvas).
 
 Example:
 ```bash
@@ -1952,7 +2057,7 @@ Mapping notes:
 - Templates like `{{messages[0].subject}}` read from the payload.
 - `transform` can point to a JS/TS module that returns a hook action.
 - `deliver: true` sends the final reply to a provider; `provider` defaults to `last` (falls back to WhatsApp).
-- If there is no prior delivery route, set `provider` + `to` explicitly (required for Telegram/Discord/Slack/Signal/iMessage).
+- If there is no prior delivery route, set `provider` + `to` explicitly (required for Telegram/Discord/Slack/Signal/iMessage/MS Teams).
 - `model` overrides the LLM for this hook run (`provider/model` or alias; must be allowed if `agents.defaults.models` is set).
 
 Gmail helper config (used by `clawdbot hooks gmail setup` / `run`):
@@ -1999,6 +2104,8 @@ Gateway auto-start:
 
 Note: when `tailscale.mode` is on, Clawdbot defaults `serve.path` to `/` so
 Tailscale can proxy `/gmail-pubsub` correctly (it strips the set-path prefix).
+If you need the backend to receive the prefixed path, set
+`hooks.gmail.tailscale.target` to a full URL (and align `serve.path`).
 
 ### `canvasHost` (LAN/tailnet Canvas file server + live reload)
 
@@ -2082,11 +2189,12 @@ clawdbot dns setup --apply
 
 ## Template variables
 
-Template placeholders are expanded in `audio.transcription.command` (and any future templated command fields).
+Template placeholders are expanded in `tools.audio.transcription.args` (and any future templated argument fields).
 
 | Variable | Description |
 |----------|-------------|
 | `{{Body}}` | Full inbound message body |
+| `{{RawBody}}` | Raw inbound message body (no history/sender wrappers; best for command parsing) |
 | `{{BodyStripped}}` | Body with group mentions stripped (best default for agents) |
 | `{{From}}` | Sender identifier (E.164 for WhatsApp; may differ per provider) |
 | `{{To}}` | Destination identifier |
@@ -2102,7 +2210,7 @@ Template placeholders are expanded in `audio.transcription.command` (and any fut
 | `{{GroupMembers}}` | Group members preview (best effort) |
 | `{{SenderName}}` | Sender display name (best effort) |
 | `{{SenderE164}}` | Sender phone number (best effort) |
-| `{{Provider}}` | Provider hint (whatsapp|telegram|discord|imessage|webchat|…) |
+| `{{Provider}}` | Provider hint (whatsapp|telegram|discord|slack|signal|imessage|msteams|webchat|…) |
 
 ## Cron (Gateway scheduler)
 

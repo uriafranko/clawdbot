@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { parseDurationMs } from "../cli/parse-duration.js";
+import { isSafeExecutableValue } from "../infra/exec-safety.js";
 
 const ModelApiSchema = z.union([
   z.literal("openai-completions"),
@@ -40,7 +41,7 @@ const ModelDefinitionSchema = z.object({
 
 const ModelProviderSchema = z.object({
   baseUrl: z.string().min(1),
-  apiKey: z.string().min(1),
+  apiKey: z.string().optional(),
   api: ModelApiSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
   authHeader: z.boolean().optional(),
@@ -60,6 +61,10 @@ const GroupChatSchema = z
     historyLimit: z.number().int().positive().optional(),
   })
   .optional();
+
+const DmConfigSchema = z.object({
+  historyLimit: z.number().int().min(0).optional(),
+});
 
 const IdentitySchema = z
   .object({
@@ -101,6 +106,60 @@ const BlockStreamingCoalesceSchema = z.object({
   minChars: z.number().int().positive().optional(),
   maxChars: z.number().int().positive().optional(),
   idleMs: z.number().int().nonnegative().optional(),
+});
+
+const BlockStreamingChunkSchema = z.object({
+  minChars: z.number().int().positive().optional(),
+  maxChars: z.number().int().positive().optional(),
+  breakPreference: z
+    .union([
+      z.literal("paragraph"),
+      z.literal("newline"),
+      z.literal("sentence"),
+    ])
+    .optional(),
+});
+
+const HumanDelaySchema = z.object({
+  mode: z
+    .union([z.literal("off"), z.literal("natural"), z.literal("custom")])
+    .optional(),
+  minMs: z.number().int().nonnegative().optional(),
+  maxMs: z.number().int().nonnegative().optional(),
+});
+
+const CliBackendSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  output: z
+    .union([z.literal("json"), z.literal("text"), z.literal("jsonl")])
+    .optional(),
+  resumeOutput: z
+    .union([z.literal("json"), z.literal("text"), z.literal("jsonl")])
+    .optional(),
+  input: z.union([z.literal("arg"), z.literal("stdin")]).optional(),
+  maxPromptArgChars: z.number().int().positive().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  clearEnv: z.array(z.string()).optional(),
+  modelArg: z.string().optional(),
+  modelAliases: z.record(z.string(), z.string()).optional(),
+  sessionArg: z.string().optional(),
+  sessionArgs: z.array(z.string()).optional(),
+  resumeArgs: z.array(z.string()).optional(),
+  sessionMode: z
+    .union([z.literal("always"), z.literal("existing"), z.literal("none")])
+    .optional(),
+  sessionIdFields: z.array(z.string()).optional(),
+  systemPromptArg: z.string().optional(),
+  systemPromptMode: z
+    .union([z.literal("append"), z.literal("replace")])
+    .optional(),
+  systemPromptWhen: z
+    .union([z.literal("first"), z.literal("always"), z.literal("never")])
+    .optional(),
+  imageArg: z.string().optional(),
+  imageMode: z.union([z.literal("repeat"), z.literal("list")]).optional(),
+  serialize: z.boolean().optional(),
 });
 
 const normalizeAllowFrom = (values?: Array<string | number>): string[] =>
@@ -159,7 +218,16 @@ const QueueSchema = z
 
 const TranscribeAudioSchema = z
   .object({
-    command: z.array(z.string()),
+    command: z.array(z.string()).superRefine((value, ctx) => {
+      const executable = value[0];
+      if (!isSafeExecutableValue(executable)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [0],
+          message: "expected safe executable name or path",
+        });
+      }
+    }),
     timeoutSeconds: z.number().int().positive().optional(),
   })
   .optional();
@@ -167,6 +235,17 @@ const TranscribeAudioSchema = z
 const HexColorSchema = z
   .string()
   .regex(/^#?[0-9a-fA-F]{6}$/, "expected hex color (RRGGBB)");
+
+const ExecutableTokenSchema = z
+  .string()
+  .refine(isSafeExecutableValue, "expected safe executable name or path");
+
+const ToolsAudioTranscriptionSchema = z
+  .object({
+    args: z.array(z.string()).optional(),
+    timeoutSeconds: z.number().int().positive().optional(),
+  })
+  .optional();
 
 const TelegramTopicSchema = z.object({
   requireMention: z.boolean().optional(),
@@ -197,8 +276,12 @@ const TelegramAccountSchemaBase = z.object({
   allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupPolicy: GroupPolicySchema.optional().default("open"),
+  historyLimit: z.number().int().min(0).optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
   textChunkLimit: z.number().int().positive().optional(),
   blockStreaming: z.boolean().optional(),
+  draftChunk: BlockStreamingChunkSchema.optional(),
   blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
   streamMode: z.enum(["off", "partial", "block"]).optional().default("partial"),
   mediaMaxMb: z.number().positive().optional(),
@@ -284,12 +367,14 @@ const DiscordAccountSchema = z.object({
   enabled: z.boolean().optional(),
   token: z.string().optional(),
   groupPolicy: GroupPolicySchema.optional().default("open"),
+  historyLimit: z.number().int().min(0).optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
   textChunkLimit: z.number().int().positive().optional(),
   blockStreaming: z.boolean().optional(),
   blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
   maxLinesPerMessage: z.number().int().positive().optional(),
   mediaMaxMb: z.number().positive().optional(),
-  historyLimit: z.number().int().min(0).optional(),
   retry: RetryConfigSchema,
   actions: z
     .object({
@@ -356,6 +441,9 @@ const SlackAccountSchema = z.object({
   appToken: z.string().optional(),
   allowBots: z.boolean().optional(),
   groupPolicy: GroupPolicySchema.optional().default("open"),
+  historyLimit: z.number().int().min(0).optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
   textChunkLimit: z.number().int().positive().optional(),
   blockStreaming: z.boolean().optional(),
   blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
@@ -399,7 +487,7 @@ const SignalAccountSchemaBase = z.object({
   httpUrl: z.string().optional(),
   httpHost: z.string().optional(),
   httpPort: z.number().int().positive().optional(),
-  cliPath: z.string().optional(),
+  cliPath: ExecutableTokenSchema.optional(),
   autoStart: z.boolean().optional(),
   receiveMode: z.union([z.literal("on-start"), z.literal("manual")]).optional(),
   ignoreAttachments: z.boolean().optional(),
@@ -409,6 +497,9 @@ const SignalAccountSchemaBase = z.object({
   allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupPolicy: GroupPolicySchema.optional().default("open"),
+  historyLimit: z.number().int().min(0).optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
   textChunkLimit: z.number().int().positive().optional(),
   blockStreaming: z.boolean().optional(),
   blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
@@ -446,7 +537,7 @@ const IMessageAccountSchemaBase = z.object({
   name: z.string().optional(),
   capabilities: z.array(z.string()).optional(),
   enabled: z.boolean().optional(),
-  cliPath: z.string().optional(),
+  cliPath: ExecutableTokenSchema.optional(),
   dbPath: z.string().optional(),
   service: z
     .union([z.literal("imessage"), z.literal("sms"), z.literal("auto")])
@@ -456,6 +547,9 @@ const IMessageAccountSchemaBase = z.object({
   allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupPolicy: GroupPolicySchema.optional().default("open"),
+  historyLimit: z.number().int().min(0).optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
   includeAttachments: z.boolean().optional(),
   mediaMaxMb: z.number().int().positive().optional(),
   textChunkLimit: z.number().int().positive().optional(),
@@ -529,6 +623,9 @@ const MSTeamsConfigSchema = z
     blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
     mediaAllowHosts: z.array(z.string()).optional(),
     requireMention: z.boolean().optional(),
+    historyLimit: z.number().int().min(0).optional(),
+    dmHistoryLimit: z.number().int().min(0).optional(),
+    dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
     replyStyle: MSTeamsReplyStyleSchema.optional(),
     teams: z.record(z.string(), MSTeamsTeamSchema.optional()).optional(),
   })
@@ -611,6 +708,8 @@ const CommandsSchema = z
   .object({
     native: z.boolean().optional(),
     text: z.boolean().optional(),
+    config: z.boolean().optional(),
+    debug: z.boolean().optional(),
     restart: z.boolean().optional(),
     useAccessGroups: z.boolean().optional(),
   })
@@ -620,6 +719,7 @@ const HeartbeatSchema = z
   .object({
     every: z.string().optional(),
     model: z.string().optional(),
+    includeReasoning: z.boolean().optional(),
     target: z
       .union([
         z.literal("last"),
@@ -697,6 +797,10 @@ const SandboxBrowserSchema = z
     noVncPort: z.number().int().positive().optional(),
     headless: z.boolean().optional(),
     enableNoVnc: z.boolean().optional(),
+    allowHostControl: z.boolean().optional(),
+    allowedControlUrls: z.array(z.string()).optional(),
+    allowedControlHosts: z.array(z.string()).optional(),
+    allowedControlPorts: z.array(z.number().int().positive()).optional(),
     autoStart: z.boolean().optional(),
     autoStartTimeoutMs: z.number().int().positive().optional(),
   })
@@ -716,16 +820,9 @@ const ToolPolicySchema = z
   })
   .optional();
 
+// Provider docking: allowlists keyed by provider id (no schema updates when adding providers).
 const ElevatedAllowFromSchema = z
-  .object({
-    whatsapp: z.array(z.string()).optional(),
-    telegram: z.array(z.union([z.string(), z.number()])).optional(),
-    discord: z.array(z.union([z.string(), z.number()])).optional(),
-    slack: z.array(z.union([z.string(), z.number()])).optional(),
-    signal: z.array(z.union([z.string(), z.number()])).optional(),
-    imessage: z.array(z.union([z.string(), z.number()])).optional(),
-    webchat: z.array(z.union([z.string(), z.number()])).optional(),
-  })
+  .record(z.string(), z.array(z.union([z.string(), z.number()])))
   .optional();
 
 const AgentSandboxSchema = z
@@ -775,6 +872,7 @@ const AgentEntrySchema = z.object({
   workspace: z.string().optional(),
   agentDir: z.string().optional(),
   model: z.string().optional(),
+  humanDelay: HumanDelaySchema.optional(),
   identity: IdentitySchema,
   groupChat: GroupChatSchema,
   subagents: z
@@ -790,6 +888,11 @@ const ToolsSchema = z
   .object({
     allow: z.array(z.string()).optional(),
     deny: z.array(z.string()).optional(),
+    audio: z
+      .object({
+        transcription: ToolsAudioTranscriptionSchema,
+      })
+      .optional(),
     agentToAgent: z
       .object({
         enabled: z.boolean().optional(),
@@ -935,6 +1038,7 @@ const HooksGmailSchema = z
           .union([z.literal("off"), z.literal("serve"), z.literal("funnel")])
           .optional(),
         path: z.string().optional(),
+        target: z.string().optional(),
       })
       .optional(),
     model: z.string().optional(),
@@ -978,6 +1082,7 @@ const AgentDefaultsSchema = z
     skipBootstrap: z.boolean().optional(),
     userTimezone: z.string().optional(),
     contextTokens: z.number().int().positive().optional(),
+    cliBackends: z.record(z.string(), CliBackendSchema).optional(),
     contextPruning: z
       .object({
         mode: z
@@ -1029,20 +1134,9 @@ const AgentDefaultsSchema = z
     blockStreamingBreak: z
       .union([z.literal("text_end"), z.literal("message_end")])
       .optional(),
-    blockStreamingChunk: z
-      .object({
-        minChars: z.number().int().positive().optional(),
-        maxChars: z.number().int().positive().optional(),
-        breakPreference: z
-          .union([
-            z.literal("paragraph"),
-            z.literal("newline"),
-            z.literal("sentence"),
-          ])
-          .optional(),
-      })
-      .optional(),
+    blockStreamingChunk: BlockStreamingChunkSchema.optional(),
     blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
+    humanDelay: HumanDelaySchema.optional(),
     timeoutSeconds: z.number().int().positive().optional(),
     mediaMaxMb: z.number().positive().optional(),
     typingIntervalSeconds: z.number().int().positive().optional(),
@@ -1089,7 +1183,6 @@ const AgentDefaultsSchema = z
       .optional(),
   })
   .optional();
-
 export const ClawdbotSchema = z
   .object({
     env: z
@@ -1276,6 +1369,9 @@ export const ClawdbotSchema = z
                 allowFrom: z.array(z.string()).optional(),
                 groupAllowFrom: z.array(z.string()).optional(),
                 groupPolicy: GroupPolicySchema.optional().default("open"),
+                historyLimit: z.number().int().min(0).optional(),
+                dmHistoryLimit: z.number().int().min(0).optional(),
+                dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
                 textChunkLimit: z.number().int().positive().optional(),
                 mediaMaxMb: z.number().int().positive().optional(),
                 blockStreaming: z.boolean().optional(),
@@ -1289,6 +1385,16 @@ export const ClawdbotSchema = z
                       })
                       .optional(),
                   )
+                  .optional(),
+                ackReaction: z
+                  .object({
+                    emoji: z.string().optional(),
+                    direct: z.boolean().optional().default(true),
+                    group: z
+                      .enum(["always", "mentions", "never"])
+                      .optional()
+                      .default("mentions"),
+                  })
                   .optional(),
               })
               .superRefine((value, ctx) => {
@@ -1314,6 +1420,9 @@ export const ClawdbotSchema = z
         allowFrom: z.array(z.string()).optional(),
         groupAllowFrom: z.array(z.string()).optional(),
         groupPolicy: GroupPolicySchema.optional().default("open"),
+        historyLimit: z.number().int().min(0).optional(),
+        dmHistoryLimit: z.number().int().min(0).optional(),
+        dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
         textChunkLimit: z.number().int().positive().optional(),
         mediaMaxMb: z.number().int().positive().optional().default(50),
         blockStreaming: z.boolean().optional(),
@@ -1334,6 +1443,16 @@ export const ClawdbotSchema = z
               })
               .optional(),
           )
+          .optional(),
+        ackReaction: z
+          .object({
+            emoji: z.string().optional(),
+            direct: z.boolean().optional().default(true),
+            group: z
+              .enum(["always", "mentions", "never"])
+              .optional()
+              .default("mentions"),
+          })
           .optional(),
       })
       .superRefine((value, ctx) => {
@@ -1459,6 +1578,19 @@ export const ClawdbotSchema = z
             debounceMs: z.number().int().min(0).optional(),
           })
           .optional(),
+        http: z
+          .object({
+            endpoints: z
+              .object({
+                chatCompletions: z
+                  .object({
+                    enabled: z.boolean().optional(),
+                  })
+                  .optional(),
+              })
+              .optional(),
+          })
+          .optional(),
       })
       .optional(),
     skills: z
@@ -1490,6 +1622,29 @@ export const ClawdbotSchema = z
                 enabled: z.boolean().optional(),
                 apiKey: z.string().optional(),
                 env: z.record(z.string(), z.string()).optional(),
+              })
+              .passthrough(),
+          )
+          .optional(),
+      })
+      .optional(),
+    plugins: z
+      .object({
+        enabled: z.boolean().optional(),
+        allow: z.array(z.string()).optional(),
+        deny: z.array(z.string()).optional(),
+        load: z
+          .object({
+            paths: z.array(z.string()).optional(),
+          })
+          .optional(),
+        entries: z
+          .record(
+            z.string(),
+            z
+              .object({
+                enabled: z.boolean().optional(),
+                config: z.record(z.string(), z.unknown()).optional(),
               })
               .passthrough(),
           )

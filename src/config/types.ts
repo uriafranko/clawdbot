@@ -22,6 +22,21 @@ export type BlockStreamingCoalesceConfig = {
   idleMs?: number;
 };
 
+export type BlockStreamingChunkConfig = {
+  minChars?: number;
+  maxChars?: number;
+  breakPreference?: "paragraph" | "newline" | "sentence";
+};
+
+export type HumanDelayConfig = {
+  /** Delay style for block replies (off|natural|custom). */
+  mode?: "off" | "natural" | "custom";
+  /** Minimum delay in milliseconds (default: 800). */
+  minMs?: number;
+  /** Maximum delay in milliseconds (default: 2500). */
+  maxMs?: number;
+};
+
 export type SessionSendPolicyAction = "allow" | "deny";
 export type SessionSendPolicyMatch = {
   provider?: string;
@@ -86,16 +101,10 @@ export type WebConfig = {
   reconnect?: WebReconnectConfig;
 };
 
-export type AgentElevatedAllowFromConfig = {
-  whatsapp?: string[];
-  telegram?: Array<string | number>;
-  discord?: Array<string | number>;
-  slack?: Array<string | number>;
-  signal?: Array<string | number>;
-  imessage?: Array<string | number>;
-  msteams?: Array<string | number>;
-  webchat?: Array<string | number>;
-};
+// Provider docking: allowlists keyed by provider id (and internal "webchat").
+export type AgentElevatedAllowFromConfig = Partial<
+  Record<string, Array<string | number>>
+>;
 
 export type IdentityConfig = {
   name?: string;
@@ -136,6 +145,12 @@ export type WhatsAppConfig = {
    * - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
    */
   groupPolicy?: GroupPolicy;
+  /** Max group messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
   /** Maximum media file size in MB. Default: 50. */
@@ -152,6 +167,21 @@ export type WhatsAppConfig = {
       requireMention?: boolean;
     }
   >;
+  /** Acknowledgment reaction sent immediately upon message receipt. */
+  ackReaction?: {
+    /** Emoji to use for acknowledgment (e.g., "👀"). Empty = disabled. */
+    emoji?: string;
+    /** Send reactions in direct chats. Default: true. */
+    direct?: boolean;
+    /**
+     * Send reactions in group chats:
+     * - "always": react to all group messages
+     * - "mentions": react only when bot is mentioned
+     * - "never": never react in groups
+     * Default: "mentions"
+     */
+    group?: "always" | "mentions" | "never";
+  };
 };
 
 export type WhatsAppAccountConfig = {
@@ -172,6 +202,12 @@ export type WhatsAppAccountConfig = {
   allowFrom?: string[];
   groupAllowFrom?: string[];
   groupPolicy?: GroupPolicy;
+  /** Max group messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   textChunkLimit?: number;
   mediaMaxMb?: number;
   blockStreaming?: boolean;
@@ -183,6 +219,21 @@ export type WhatsAppAccountConfig = {
       requireMention?: boolean;
     }
   >;
+  /** Acknowledgment reaction sent immediately upon message receipt. */
+  ackReaction?: {
+    /** Emoji to use for acknowledgment (e.g., "👀"). Empty = disabled. */
+    emoji?: string;
+    /** Send reactions in direct chats. Default: true. */
+    direct?: boolean;
+    /**
+     * Send reactions in group chats:
+     * - "always": react to all group messages
+     * - "mentions": react only when bot is mentioned
+     * - "never": never react in groups
+     * Default: "mentions"
+     */
+    group?: "always" | "mentions" | "never";
+  };
 };
 
 export type BrowserProfileConfig = {
@@ -278,6 +329,8 @@ export type HooksGmailConfig = {
   tailscale?: {
     mode?: HooksGmailTailscaleMode;
     path?: string;
+    /** Optional tailscale serve/funnel target (port, host:port, or full URL). */
+    target?: string;
   };
   /** Optional model override for Gmail hook processing (provider/model or alias). */
   model?: string;
@@ -332,10 +385,18 @@ export type TelegramAccountConfig = {
    * - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
    */
   groupPolicy?: GroupPolicy;
+  /** Max group messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
   /** Disable block streaming for this account. */
   blockStreaming?: boolean;
+  /** Chunking config for draft streaming in `streamMode: "block"`. */
+  draftChunk?: BlockStreamingChunkConfig;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
   /** Draft streaming mode for Telegram (off|partial|block). Default: partial. */
@@ -473,6 +534,10 @@ export type DiscordAccountConfig = {
   maxLinesPerMessage?: number;
   mediaMaxMb?: number;
   historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   /** Retry policy for outbound Discord API calls. */
   retry?: OutboundRetryConfig;
   /** Per-action tool gating (default: true for all). */
@@ -567,6 +632,12 @@ export type SlackAccountConfig = {
    * - "allowlist": only allow channels present in slack.channels
    */
   groupPolicy?: GroupPolicy;
+  /** Max channel messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   textChunkLimit?: number;
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
@@ -624,6 +695,12 @@ export type SignalAccountConfig = {
    * - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
    */
   groupPolicy?: GroupPolicy;
+  /** Max group messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
   blockStreaming?: boolean;
@@ -697,6 +774,12 @@ export type MSTeamsConfig = {
   mediaAllowHosts?: Array<string>;
   /** Default: require @mention to respond in channels/groups. */
   requireMention?: boolean;
+  /** Max group/channel messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   /** Default reply style: "thread" replies to the message, "top-level" posts a new message. */
   replyStyle?: MSTeamsReplyStyle;
   /** Per-team config. Key is team ID (from the /team/ URL path segment). */
@@ -731,6 +814,12 @@ export type IMessageAccountConfig = {
    * - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
    */
   groupPolicy?: GroupPolicy;
+  /** Max group messages to keep as history context (0 disables). */
+  historyLimit?: number;
+  /** Max DM turns to keep as history context. */
+  dmHistoryLimit?: number;
+  /** Per-DM config overrides keyed by user ID. */
+  dms?: Record<string, DmConfig>;
   /** Include attachments + reactions in watch payloads. */
   includeAttachments?: boolean;
   /** Max outbound media size in MB. */
@@ -828,6 +917,26 @@ export type SandboxBrowserSettings = {
   headless?: boolean;
   enableNoVnc?: boolean;
   /**
+   * Allow sandboxed sessions to target the host browser control server.
+   * Default: false.
+   */
+  allowHostControl?: boolean;
+  /**
+   * Allowlist of exact control URLs for target="custom".
+   * When set, any custom controlUrl must match this list.
+   */
+  allowedControlUrls?: string[];
+  /**
+   * Allowlist of hostnames for control URLs (hostname only, no ports).
+   * When set, controlUrl hostname must match.
+   */
+  allowedControlHosts?: string[];
+  /**
+   * Allowlist of ports for control URLs.
+   * When set, controlUrl port must match (defaults: http=80, https=443).
+   */
+  allowedControlPorts?: number[];
+  /**
    * When true (default), sandboxed browser control will try to start/reattach to
    * the sandbox browser container when a tool call needs it.
    */
@@ -845,6 +954,10 @@ export type SandboxPruneSettings = {
 
 export type GroupChatConfig = {
   mentionPatterns?: string[];
+  historyLimit?: number;
+};
+
+export type DmConfig = {
   historyLimit?: number;
 };
 
@@ -877,6 +990,13 @@ export type AgentToolsConfig = {
 export type ToolsConfig = {
   allow?: string[];
   deny?: string[];
+  audio?: {
+    transcription?: {
+      /** CLI args (template-enabled). */
+      args?: string[];
+      timeoutSeconds?: number;
+    };
+  };
   agentToAgent?: {
     /** Enable agent-to-agent messaging tools. Default: false. */
     enabled?: boolean;
@@ -922,6 +1042,8 @@ export type AgentConfig = {
   workspace?: string;
   agentDir?: string;
   model?: string;
+  /** Human-like delay between block replies for this agent. */
+  humanDelay?: HumanDelayConfig;
   identity?: IdentityConfig;
   groupChat?: GroupChatConfig;
   subagents?: {
@@ -983,6 +1105,7 @@ export type BroadcastConfig = {
 };
 
 export type AudioConfig = {
+  /** @deprecated Use tools.audio.transcription instead. */
   transcription?: {
     // Optional CLI to turn inbound audio into text; templated args, must output transcript to stdout.
     command: string[];
@@ -1015,6 +1138,10 @@ export type CommandsConfig = {
   native?: boolean;
   /** Enable text command parsing (default: true). */
   text?: boolean;
+  /** Allow /config command (default: false). */
+  config?: boolean;
+  /** Allow /debug command (default: false). */
+  debug?: boolean;
   /** Allow restart commands/tools (default: false). */
   restart?: boolean;
   /** Enforce access-group allowlists/policies for commands (default: true). */
@@ -1120,6 +1247,22 @@ export type GatewayReloadConfig = {
   debounceMs?: number;
 };
 
+export type GatewayHttpChatCompletionsConfig = {
+  /**
+   * If false, the Gateway will not serve `POST /v1/chat/completions`.
+   * Default: false when absent.
+   */
+  enabled?: boolean;
+};
+
+export type GatewayHttpEndpointsConfig = {
+  chatCompletions?: GatewayHttpChatCompletionsConfig;
+};
+
+export type GatewayHttpConfig = {
+  endpoints?: GatewayHttpEndpointsConfig;
+};
+
 export type GatewayConfig = {
   /** Single multiplexed port for Gateway WS + HTTP (default: 18789). */
   port?: number;
@@ -1138,6 +1281,7 @@ export type GatewayConfig = {
   tailscale?: GatewayTailscaleConfig;
   remote?: GatewayRemoteConfig;
   reload?: GatewayReloadConfig;
+  http?: GatewayHttpConfig;
 };
 
 export type SkillConfig = {
@@ -1166,6 +1310,27 @@ export type SkillsConfig = {
   load?: SkillsLoadConfig;
   install?: SkillsInstallConfig;
   entries?: Record<string, SkillConfig>;
+};
+
+export type PluginEntryConfig = {
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+};
+
+export type PluginsLoadConfig = {
+  /** Additional plugin/extension paths to load. */
+  paths?: string[];
+};
+
+export type PluginsConfig = {
+  /** Enable or disable plugin loading. */
+  enabled?: boolean;
+  /** Optional plugin allowlist (plugin ids). */
+  allow?: string[];
+  /** Optional plugin denylist (plugin ids). */
+  deny?: string[];
+  load?: PluginsLoadConfig;
+  entries?: Record<string, PluginEntryConfig>;
 };
 
 export type ModelApi =
@@ -1201,7 +1366,7 @@ export type ModelDefinitionConfig = {
 
 export type ModelProviderConfig = {
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   api?: ModelApi;
   headers?: Record<string, string>;
   authHeader?: boolean;
@@ -1275,6 +1440,51 @@ export type AgentContextPruningConfig = {
   };
 };
 
+export type CliBackendConfig = {
+  /** CLI command to execute (absolute path or on PATH). */
+  command: string;
+  /** Base args applied to every invocation. */
+  args?: string[];
+  /** Output parsing mode (default: json). */
+  output?: "json" | "text" | "jsonl";
+  /** Output parsing mode when resuming a CLI session. */
+  resumeOutput?: "json" | "text" | "jsonl";
+  /** Prompt input mode (default: arg). */
+  input?: "arg" | "stdin";
+  /** Max prompt length for arg mode (if exceeded, stdin is used). */
+  maxPromptArgChars?: number;
+  /** Extra env vars injected for this CLI. */
+  env?: Record<string, string>;
+  /** Env vars to remove before launching this CLI. */
+  clearEnv?: string[];
+  /** Flag used to pass model id (e.g. --model). */
+  modelArg?: string;
+  /** Model aliases mapping (config model id → CLI model id). */
+  modelAliases?: Record<string, string>;
+  /** Flag used to pass session id (e.g. --session-id). */
+  sessionArg?: string;
+  /** Extra args used when resuming a session (use {sessionId} placeholder). */
+  sessionArgs?: string[];
+  /** Alternate args to use when resuming a session (use {sessionId} placeholder). */
+  resumeArgs?: string[];
+  /** When to pass session ids. */
+  sessionMode?: "always" | "existing" | "none";
+  /** JSON fields to read session id from (in order). */
+  sessionIdFields?: string[];
+  /** Flag used to pass system prompt. */
+  systemPromptArg?: string;
+  /** System prompt behavior (append vs replace). */
+  systemPromptMode?: "append" | "replace";
+  /** When to send system prompt. */
+  systemPromptWhen?: "first" | "always" | "never";
+  /** Flag used to pass image paths. */
+  imageArg?: string;
+  /** How to pass multiple images. */
+  imageMode?: "repeat" | "list";
+  /** Serialize runs for this CLI. */
+  serialize?: boolean;
+};
+
 export type AgentDefaultsConfig = {
   /** Primary model and fallbacks (provider/model). */
   model?: AgentModelListConfig;
@@ -1290,6 +1500,8 @@ export type AgentDefaultsConfig = {
   userTimezone?: string;
   /** Optional display-only context window override (used for % in status UIs). */
   contextTokens?: number;
+  /** Optional CLI backends for text-only fallback (claude-cli, etc.). */
+  cliBackends?: Record<string, CliBackendConfig>;
   /** Opt-in: prune old tool results from the LLM context to reduce token usage. */
   contextPruning?: AgentContextPruningConfig;
   /** Default thinking level when no /think directive is present. */
@@ -1307,16 +1519,14 @@ export type AgentDefaultsConfig = {
    */
   blockStreamingBreak?: "text_end" | "message_end";
   /** Soft block chunking for streamed replies (min/max chars, prefer paragraph/newline). */
-  blockStreamingChunk?: {
-    minChars?: number;
-    maxChars?: number;
-    breakPreference?: "paragraph" | "newline" | "sentence";
-  };
+  blockStreamingChunk?: BlockStreamingChunkConfig;
   /**
    * Block reply coalescing (merge streamed chunks before send).
    * idleMs: wait time before flushing when idle.
    */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
+  /** Human-like delay between block replies. */
+  humanDelay?: HumanDelayConfig;
   timeoutSeconds?: number;
   /** Max inbound media size in MB for agent-visible attachments (text note or future image attach). */
   mediaMaxMb?: number;
@@ -1346,6 +1556,13 @@ export type AgentDefaultsConfig = {
     prompt?: string;
     /** Max chars allowed after HEARTBEAT_OK before delivery (default: 30). */
     ackMaxChars?: number;
+    /**
+     * When enabled, deliver the model's reasoning payload for heartbeat runs (when available)
+     * as a separate message prefixed with `Reasoning:` (same as `/reasoning on`).
+     *
+     * Default: false (only the final heartbeat payload is delivered).
+     */
+    includeReasoning?: boolean;
   };
   /** Max concurrent agent runs across all conversations. Default: 1 (sequential). */
   maxConcurrent?: number;
@@ -1420,6 +1637,7 @@ export type ClawdbotConfig = {
     seamColor?: string;
   };
   skills?: SkillsConfig;
+  plugins?: PluginsConfig;
   models?: ModelsConfig;
   agents?: AgentsConfig;
   tools?: ToolsConfig;

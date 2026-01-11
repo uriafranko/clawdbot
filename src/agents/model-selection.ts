@@ -24,7 +24,18 @@ export function modelKey(provider: string, model: string) {
 export function normalizeProviderId(provider: string): string {
   const normalized = provider.trim().toLowerCase();
   if (normalized === "z.ai" || normalized === "z-ai") return "zai";
+  if (normalized === "opencode-zen") return "opencode";
   return normalized;
+}
+
+export function isCliProvider(provider: string, cfg?: ClawdbotConfig): boolean {
+  const normalized = normalizeProviderId(provider);
+  if (normalized === "claude-cli") return true;
+  if (normalized === "codex-cli") return true;
+  const backends = cfg?.agents?.defaults?.cliBackends ?? {};
+  return Object.keys(backends).some(
+    (key) => normalizeProviderId(key) === normalized,
+  );
 }
 
 function normalizeAnthropicModelId(model: string): string {
@@ -172,7 +183,9 @@ export function buildAllowedModelSet(params: {
     const parsed = parseModelRef(String(raw), params.defaultProvider);
     if (!parsed) continue;
     const key = modelKey(parsed.provider, parsed.model);
-    if (catalogKeys.has(key)) {
+    if (isCliProvider(parsed.provider, params.cfg)) {
+      allowedKeys.add(key);
+    } else if (catalogKeys.has(key)) {
       allowedKeys.add(key);
     }
   }
@@ -185,7 +198,7 @@ export function buildAllowedModelSet(params: {
     allowedKeys.has(modelKey(entry.provider, entry.id)),
   );
 
-  if (allowedCatalog.length === 0) {
+  if (allowedCatalog.length === 0 && allowedKeys.size === 0) {
     if (defaultKey) catalogKeys.add(defaultKey);
     return {
       allowAny: true,

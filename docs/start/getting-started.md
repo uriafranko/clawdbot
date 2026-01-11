@@ -47,10 +47,20 @@ Windows: use **WSL2** (Ubuntu recommended). WSL2 is strongly recommended; native
 ## 1) Install the CLI (recommended)
 
 ```bash
-npm install -g clawdbot@latest
+curl -fsSL https://clawd.bot/install.sh | bash
 ```
 
-Or:
+Windows (PowerShell):
+
+```powershell
+iwr -useb https://clawd.bot/install.ps1 | iex
+```
+
+Alternative (global install):
+
+```bash
+npm install -g clawdbot@latest
+```
 
 ```bash
 pnpm add -g clawdbot@latest
@@ -64,16 +74,17 @@ clawdbot onboard --install-daemon
 
 What you’ll choose:
 - **Local vs Remote** gateway
-- **Auth**: **Anthropic OAuth via Claude CLI setup-token (preferred)**, OpenAI OAuth (recommended), API key (optional), or skip for now
+- **Auth**: OpenAI Code (Codex) subscription (OAuth) or API keys. For Anthropic we recommend an API key; `claude setup-token` is also supported.
 - **Providers**: WhatsApp QR login, Telegram/Discord bot tokens, etc.
 - **Daemon**: background install (launchd/systemd; WSL2 uses systemd)
   - **Runtime**: Node (recommended; required for WhatsApp) or Bun (faster, but incompatible with WhatsApp)
+- **Gateway token**: the wizard generates one by default (even on loopback) and stores it in `gateway.auth.token`.
 
 Wizard doc: [Wizard](/start/wizard)
 
 ### Auth: where it lives (important)
 
-- **Preferred Anthropic path:** install Claude CLI on the gateway host and run `claude setup-token`. The wizard can reuse it, and `clawdbot models status` will sync it into Clawdbot auth profiles.
+- **Recommended Anthropic path:** set an API key (wizard can store it for daemon use). `claude setup-token` is also supported if you want to reuse Claude Code credentials.
 
 - OAuth credentials (legacy import): `~/.clawdbot/credentials/oauth.json`
 - Auth profiles (OAuth + API keys): `~/.clawdbot/agents/<agentId>/agent/auth-profiles.json`
@@ -95,6 +106,7 @@ clawdbot gateway --port 18789 --verbose
 ```
 
 Dashboard (local loopback): `http://127.0.0.1:18789/`
+If a token is configured, paste it into the Control UI settings (stored as `connect.params.auth.token`).
 
 ⚠️ **WhatsApp + Bun warning:** Baileys (WhatsApp Web library) uses a WebSocket
 path that is currently incompatible with Bun and can cause memory corruption on
@@ -128,8 +140,8 @@ Default posture: unknown DMs get a short code and messages are not processed unt
 If your first DM gets no reply, approve the pairing:
 
 ```bash
-clawdbot pairing list --provider whatsapp
-clawdbot pairing approve --provider whatsapp <code>
+clawdbot pairing list whatsapp
+clawdbot pairing approve whatsapp <code>
 ```
 
 Pairing doc: [Pairing](/start/pairing)
@@ -158,14 +170,15 @@ node dist/entry.js gateway --port 18789 --verbose
 In a new terminal:
 
 ```bash
+clawdbot status
 clawdbot health
 clawdbot message send --to +15555550123 --message "Hello from Clawdbot"
 ```
 
 If `health` shows “no auth configured”, go back to the wizard and set OAuth/key auth — the agent won’t be able to respond without it.
 
-Local probe tip: `clawdbot status --deep` runs provider checks without needing a gateway connection.
-Gateway snapshot: `clawdbot providers status` shows what the gateway reports (use `status --deep` for local-only probes).
+Tip: `clawdbot status --all` is the best pasteable, read-only debug report.
+Health probes: `clawdbot health` (or `clawdbot status --deep`) asks the running gateway for a health snapshot.
 
 ## Next steps (optional, but great)
 

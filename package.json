@@ -58,7 +58,7 @@
     "docs:list": "tsx scripts/docs-list.ts",
     "docs:bin": "bun build scripts/docs-list.ts --compile --outfile bin/docs-list",
     "docs:dev": "cd docs && mint dev",
-    "docs:build": "cd docs && pnpm dlx mint broken-links",
+    "docs:build": "cd docs && pnpm dlx --reporter append-only mint broken-links",
     "build": "tsc -p tsconfig.json && tsx scripts/canvas-a2ui-copy.ts",
     "release:check": "tsx scripts/release-check.ts",
     "ui:install": "node scripts/ui.js install",
@@ -104,6 +104,13 @@
     "test:docker:live-gateway": "bash scripts/test-live-gateway-models-docker.sh",
     "test:docker:qr": "bash scripts/e2e/qr-import-docker.sh",
     "test:docker:doctor-switch": "bash scripts/e2e/doctor-install-switch-docker.sh",
+    "test:docker:plugins": "bash scripts/e2e/plugins-docker.sh",
+    "test:docker:cleanup": "bash scripts/test-cleanup-docker.sh",
+    "test:docker:all": "pnpm test:docker:live-models && pnpm test:docker:live-gateway && pnpm test:docker:onboard && pnpm test:docker:gateway-network && pnpm test:docker:qr && pnpm test:docker:doctor-switch && pnpm test:docker:plugins && pnpm test:docker:cleanup",
+    "test:all": "pnpm lint && pnpm build && pnpm test && pnpm test:e2e && pnpm test:live && pnpm test:docker:all",
+    "test:install:e2e": "bash scripts/test-install-sh-e2e-docker.sh",
+    "test:install:e2e:openai": "CLAWDBOT_E2E_MODELS=openai bash scripts/test-install-sh-e2e-docker.sh",
+    "test:install:e2e:anthropic": "CLAWDBOT_E2E_MODELS=anthropic bash scripts/test-install-sh-e2e-docker.sh",
     "protocol:gen": "tsx scripts/protocol-gen.ts",
     "protocol:gen:swift": "tsx scripts/protocol-gen-swift.ts",
     "protocol:check": "pnpm protocol:gen && pnpm protocol:gen:swift && git diff --exit-code -- dist/protocol.schema.json apps/macos/Sources/ClawdbotProtocol/GatewayModels.swift",
@@ -117,7 +124,7 @@
   },
   "packageManager": "pnpm@10.23.0",
   "dependencies": {
-    "@buape/carbon": "0.0.0-beta-20260109194934",
+    "@buape/carbon": "0.0.0-beta-20260110172854",
     "@clack/prompts": "^0.11.0",
     "@grammyjs/runner": "^2.0.3",
     "@grammyjs/transformer-throttler": "^1.2.1",
@@ -146,6 +153,7 @@
     "express": "^5.2.1",
     "file-type": "^21.3.0",
     "grammy": "^1.39.2",
+    "jiti": "^2.6.1",
     "json5": "^2.2.3",
     "long": "5.3.2",
     "markdown-it": "^14.1.0",
@@ -189,16 +197,12 @@
     "wireit": "^0.14.12"
   },
   "pnpm": {
+    "minimumReleaseAge": 2880,
     "overrides": {
       "@sinclair/typebox": "0.34.47"
     },
     "patchedDependencies": {
-      "@buape/carbon@0.0.0-beta-20260109194934": "patches/@buape__carbon@0.0.0-beta-20260109194934.patch",
-      "@mariozechner/pi-agent-core": "patches/@mariozechner__pi-agent-core.patch",
-      "@mariozechner/pi-ai@0.42.2": "patches/@mariozechner__pi-ai@0.42.2.patch",
-      "@mariozechner/pi-coding-agent": "patches/@mariozechner__pi-coding-agent.patch",
-      "playwright-core@1.57.0": "patches/playwright-core@1.57.0.patch",
-      "qrcode-terminal": "patches/qrcode-terminal.patch"
+      "@mariozechner/pi-ai@0.42.2": "patches/@mariozechner__pi-ai@0.42.2.patch"
     }
   },
   "vitest": {

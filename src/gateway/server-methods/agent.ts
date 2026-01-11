@@ -9,6 +9,8 @@ import {
   saveSessionStore,
 } from "../../config/sessions.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
+import { resolveOutboundTarget } from "../../infra/outbound/targets.js";
+import { DEFAULT_CHAT_PROVIDER } from "../../providers/registry.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
@@ -18,11 +20,7 @@ import {
   isGatewayMessageProvider,
   normalizeMessageProvider,
 } from "../../utils/message-provider.js";
-import { normalizeE164 } from "../../utils.js";
-import {
-  isWhatsAppGroupJid,
-  normalizeWhatsAppTarget,
-} from "../../whatsapp/normalize.js";
+import { parseMessageWithAttachments } from "../chat-attachments.js";
 import {
   type AgentWaitParams,
   ErrorCodes,
@@ -57,6 +55,12 @@ export const agentHandlers: GatewayRequestHandlers = {
       sessionKey?: string;
       thinking?: string;
       deliver?: boolean;
+      attachments?: Array<{
+        type?: string;
+        mimeType?: string;
+        fileName?: string;
+        content?: unknown;
+      }>;
       provider?: string;
       lane?: string;
       extraSystemPrompt?: string;
@@ -73,7 +77,45 @@ export const agentHandlers: GatewayRequestHandlers = {
       });
       return;
     }
-    const message = request.message.trim();
+    const normalizedAttachments =
+      request.attachments
+        ?.map((a) => ({
+          type: typeof a?.type === "string" ? a.type : undefined,
+          mimeType: typeof a?.mimeType === "string" ? a.mimeType : undefined,
+          fileName: typeof a?.fileName === "string" ? a.fileName : undefined,
+          content:
+            typeof a?.content === "string"
+              ? a.content
+              : ArrayBuffer.isView(a?.content)
+                ? Buffer.from(
+                    a.content.buffer,
+                    a.content.byteOffset,
+                    a.content.byteLength,
+                  ).toString("base64")
+                : undefined,
+        }))
+        .filter((a) => a.content) ?? [];
+
+    let message = request.message.trim();
+    let images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+    if (normalizedAttachments.length > 0) {
+      try {
+        const parsed = await parseMessageWithAttachments(
+          message,
+          normalizedAttachments,
+          { maxBytes: 5_000_000, log: context.logGateway },
+        );
+        message = parsed.message.trim();
+        images = parsed.images;
+      } catch (err) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, String(err)),
+        );
+        return;
+      }
+    }
     const rawProvider =
       typeof request.provider === "string" ? request.provider.trim() : "";
     if (rawProvider) {
@@ -193,7 +235,9 @@ export const agentHandlers: GatewayRequestHandlers = {
         if (lastProvider && lastProvider !== INTERNAL_MESSAGE_PROVIDER) {
           return lastProvider;
         }
-        return wantsDelivery ? "whatsapp" : INTERNAL_MESSAGE_PROVIDER;
+        return wantsDelivery
+          ? DEFAULT_CHAT_PROVIDER
+          : INTERNAL_MESSAGE_PROVIDER;
       }
 
       if (isGatewayMessageProvider(requestedProvider)) return requestedProvider;
@@ -201,59 +245,35 @@ export const agentHandlers: GatewayRequestHandlers = {
       if (lastProvider && lastProvider !== INTERNAL_MESSAGE_PROVIDER) {
         return lastProvider;
       }
-      return wantsDelivery ? "whatsapp" : INTERNAL_MESSAGE_PROVIDER;
+      return wantsDelivery ? DEFAULT_CHAT_PROVIDER : INTERNAL_MESSAGE_PROVIDER;
     })();
 
-    const resolvedTo = (() => {
-      const explicit =
-        typeof request.to === "string" && request.to.trim()
-          ? request.to.trim()
-          : undefined;
-      if (explicit) return explicit;
-      if (isDeliverableMessageProvider(resolvedProvider)) {
-        return lastTo || undefined;
-      }
-      return undefined;
-    })();
-
-    const sanitizedTo = (() => {
-      // If we derived a WhatsApp recipient from session "lastTo", ensure it is still valid
-      // for the configured allowlist. Otherwise, fall back to the first allowed number so
-      // voice wake doesn't silently route to stale/test recipients.
-      if (resolvedProvider !== "whatsapp") return resolvedTo;
-      const explicit =
-        typeof request.to === "string" && request.to.trim()
-          ? request.to.trim()
-          : undefined;
-      if (explicit) {
-        if (!resolvedTo) return resolvedTo;
-        return normalizeWhatsAppTarget(resolvedTo) ?? resolvedTo;
-      }
-      if (resolvedTo && isWhatsAppGroupJid(resolvedTo)) {
-        return normalizeWhatsAppTarget(resolvedTo) ?? resolvedTo;
-      }
-
+    const explicitTo =
+      typeof request.to === "string" && request.to.trim()
+        ? request.to.trim()
+        : undefined;
+    const deliveryTargetMode = explicitTo
+      ? "explicit"
+      : isDeliverableMessageProvider(resolvedProvider)
+        ? "implicit"
+        : undefined;
+    let resolvedTo =
+      explicitTo ||
+      (isDeliverableMessageProvider(resolvedProvider)
+        ? lastTo || undefined
+        : undefined);
+    if (!resolvedTo && isDeliverableMessageProvider(resolvedProvider)) {
       const cfg = cfgForAgent ?? loadConfig();
-      const rawAllow = cfg.whatsapp?.allowFrom ?? [];
-      if (rawAllow.includes("*")) {
-        return resolvedTo
-          ? (normalizeWhatsAppTarget(resolvedTo) ?? resolvedTo)
-          : resolvedTo;
+      const fallback = resolveOutboundTarget({
+        provider: resolvedProvider,
+        cfg,
+        accountId: sessionEntry?.lastAccountId ?? undefined,
+        mode: "implicit",
+      });
+      if (fallback.ok) {
+        resolvedTo = fallback.to;
       }
-      const allowFrom = rawAllow
-        .map((val) => normalizeE164(val))
-        .filter((val) => val.length > 1);
-      if (allowFrom.length === 0) return resolvedTo;
-
-      const normalizedLast =
-        typeof resolvedTo === "string" && resolvedTo.trim()
-          ? normalizeWhatsAppTarget(resolvedTo)
-          : undefined;
-      if (normalizedLast && allowFrom.includes(normalizedLast)) {
-        return normalizedLast;
-      }
-      return allowFrom[0];
-    })();
+    }
 
     const deliver =
       request.deliver === true &&
@@ -275,11 +295,13 @@ export const agentHandlers: GatewayRequestHandlers = {
     void agentCommand(
       {
         message,
-        to: sanitizedTo,
+        images,
+        to: resolvedTo,
         sessionId: resolvedSessionId,
         sessionKey: requestedSessionKey,
         thinking: request.thinking,
         deliver,
+        deliveryTargetMode,
         provider: resolvedProvider,
         timeout: request.timeout?.toString(),
         bestEffortDeliver,

@@ -11,6 +11,9 @@ import {
   applyMinimaxApiProviderConfig,
   applyOpencodeZenConfig,
   applyOpencodeZenProviderConfig,
+  applyOpenrouterConfig,
+  applyOpenrouterProviderConfig,
+  OPENROUTER_DEFAULT_MODEL_REF,
   writeOAuthCredentials,
 } from "./onboard-auth.js";
 
@@ -177,7 +180,7 @@ describe("applyMinimaxApiConfig", () => {
     ).toMatchObject({ alias: "Minimax", params: { custom: "value" } });
   });
 
-  it("replaces existing minimax provider entirely", () => {
+  it("merges existing minimax provider models", () => {
     const cfg = applyMinimaxApiConfig({
       models: {
         providers: {
@@ -204,7 +207,11 @@ describe("applyMinimaxApiConfig", () => {
       "https://api.minimax.io/anthropic",
     );
     expect(cfg.models?.providers?.minimax?.api).toBe("anthropic-messages");
-    expect(cfg.models?.providers?.minimax?.models[0]?.id).toBe("MiniMax-M2.1");
+    expect(cfg.models?.providers?.minimax?.apiKey).toBe("old-key");
+    expect(cfg.models?.providers?.minimax?.models.map((m) => m.id)).toEqual([
+      "old-model",
+      "MiniMax-M2.1",
+    ]);
   });
 
   it("preserves other providers when adding minimax", () => {
@@ -254,23 +261,10 @@ describe("applyMinimaxApiProviderConfig", () => {
 });
 
 describe("applyOpencodeZenProviderConfig", () => {
-  it("adds opencode-zen provider with correct settings", () => {
-    const cfg = applyOpencodeZenProviderConfig({});
-    expect(cfg.models?.providers?.["opencode-zen"]).toMatchObject({
-      baseUrl: "https://opencode.ai/zen/v1",
-      apiKey: "opencode-zen",
-      api: "openai-completions",
-    });
-    expect(
-      cfg.models?.providers?.["opencode-zen"]?.models.length,
-    ).toBeGreaterThan(0);
-  });
-
-  it("adds allowlist entries for fallback models", () => {
+  it("adds allowlist entry for the default model", () => {
     const cfg = applyOpencodeZenProviderConfig({});
     const models = cfg.agents?.defaults?.models ?? {};
-    expect(Object.keys(models)).toContain("opencode-zen/claude-opus-4-5");
-    expect(Object.keys(models)).toContain("opencode-zen/gpt-5.2");
+    expect(Object.keys(models)).toContain("opencode/claude-opus-4-5");
   });
 
   it("preserves existing alias for the default model", () => {
@@ -278,13 +272,13 @@ describe("applyOpencodeZenProviderConfig", () => {
       agents: {
         defaults: {
           models: {
-            "opencode-zen/claude-opus-4-5": { alias: "My Opus" },
+            "opencode/claude-opus-4-5": { alias: "My Opus" },
           },
         },
       },
     });
     expect(
-      cfg.agents?.defaults?.models?.["opencode-zen/claude-opus-4-5"]?.alias,
+      cfg.agents?.defaults?.models?.["opencode/claude-opus-4-5"]?.alias,
     ).toBe("My Opus");
   });
 });
@@ -293,12 +287,57 @@ describe("applyOpencodeZenConfig", () => {
   it("sets correct primary model", () => {
     const cfg = applyOpencodeZenConfig({});
     expect(cfg.agents?.defaults?.model?.primary).toBe(
-      "opencode-zen/claude-opus-4-5",
+      "opencode/claude-opus-4-5",
     );
   });
 
   it("preserves existing model fallbacks", () => {
     const cfg = applyOpencodeZenConfig({
+      agents: {
+        defaults: {
+          model: { fallbacks: ["anthropic/claude-opus-4-5"] },
+        },
+      },
+    });
+    expect(cfg.agents?.defaults?.model?.fallbacks).toEqual([
+      "anthropic/claude-opus-4-5",
+    ]);
+  });
+});
+
+describe("applyOpenrouterProviderConfig", () => {
+  it("adds allowlist entry for the default model", () => {
+    const cfg = applyOpenrouterProviderConfig({});
+    const models = cfg.agents?.defaults?.models ?? {};
+    expect(Object.keys(models)).toContain(OPENROUTER_DEFAULT_MODEL_REF);
+  });
+
+  it("preserves existing alias for the default model", () => {
+    const cfg = applyOpenrouterProviderConfig({
+      agents: {
+        defaults: {
+          models: {
+            [OPENROUTER_DEFAULT_MODEL_REF]: { alias: "Router" },
+          },
+        },
+      },
+    });
+    expect(
+      cfg.agents?.defaults?.models?.[OPENROUTER_DEFAULT_MODEL_REF]?.alias,
+    ).toBe("Router");
+  });
+});
+
+describe("applyOpenrouterConfig", () => {
+  it("sets correct primary model", () => {
+    const cfg = applyOpenrouterConfig({});
+    expect(cfg.agents?.defaults?.model?.primary).toBe(
+      OPENROUTER_DEFAULT_MODEL_REF,
+    );
+  });
+
+  it("preserves existing model fallbacks", () => {
+    const cfg = applyOpenrouterConfig({
       agents: {
         defaults: {
           model: { fallbacks: ["anthropic/claude-opus-4-5"] },

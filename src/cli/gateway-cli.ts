@@ -5,6 +5,10 @@ import path from "node:path";
 import type { Command } from "commander";
 import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace.js";
 import { gatewayStatusCommand } from "../commands/gateway-status.js";
+import {
+  formatHealthProviderLines,
+  type HealthSummary,
+} from "../commands/health.js";
 import { handleReset } from "../commands/onboard-helpers.js";
 import {
   CONFIG_PATH_CLAWDBOT,
@@ -15,9 +19,9 @@ import {
   writeConfigFile,
 } from "../config/config.js";
 import {
-  GATEWAY_LAUNCH_AGENT_LABEL,
-  GATEWAY_SYSTEMD_SERVICE_NAME,
-  GATEWAY_WINDOWS_TASK_NAME,
+  resolveGatewayLaunchAgentLabel,
+  resolveGatewaySystemdServiceName,
+  resolveGatewayWindowsTaskName,
 } from "../daemon/constants.js";
 import { resolveGatewayService } from "../daemon/service.js";
 import { resolveGatewayAuth } from "../gateway/auth.js";
@@ -38,7 +42,12 @@ import {
   setConsoleSubsystemFilter,
 } from "../logging.js";
 import { defaultRuntime } from "../runtime.js";
+import { formatDocsLink } from "../terminal/links.js";
 import { colorize, isRich, theme } from "../terminal/theme.js";
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+} from "../utils/message-provider.js";
 import { resolveUserPath } from "../utils.js";
 import { forceFreePortAndWait } from "./ports.js";
 import { withProgress } from "./progress.js";
@@ -361,22 +370,25 @@ function extractGatewayMiskeys(parsed: unknown): {
   return { hasGatewayToken, hasRemoteToken };
 }
 
-function renderGatewayServiceStopHints(): string[] {
+function renderGatewayServiceStopHints(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const profile = env.CLAWDBOT_PROFILE;
   switch (process.platform) {
     case "darwin":
       return [
         "Tip: clawdbot daemon stop",
-        `Or: launchctl bootout gui/$UID/${GATEWAY_LAUNCH_AGENT_LABEL}`,
+        `Or: launchctl bootout gui/$UID/${resolveGatewayLaunchAgentLabel(profile)}`,
       ];
     case "linux":
       return [
         "Tip: clawdbot daemon stop",
-        `Or: systemctl --user stop ${GATEWAY_SYSTEMD_SERVICE_NAME}.service`,
+        `Or: systemctl --user stop ${resolveGatewaySystemdServiceName(profile)}.service`,
       ];
     case "win32":
       return [
         "Tip: clawdbot daemon stop",
-        `Or: schtasks /End /TN "${GATEWAY_WINDOWS_TASK_NAME}"`,
+        `Or: schtasks /End /TN "${resolveGatewayWindowsTaskName(profile)}"`,
       ];
     default:
       return ["Tip: clawdbot daemon stop"];
@@ -387,7 +399,7 @@ async function maybeExplainGatewayServiceStop() {
   const service = resolveGatewayService();
   let loaded: boolean | null = null;
   try {
-    loaded = await service.isLoaded({ env: process.env });
+    loaded = await service.isLoaded({ profile: process.env.CLAWDBOT_PROFILE });
   } catch {
     loaded = null;
   }
@@ -519,8 +531,8 @@ const callGatewayCli = async (
         params,
         expectFinal: Boolean(opts.expectFinal),
         timeoutMs: Number(opts.timeout ?? 10_000),
-        clientName: "cli",
-        mode: "cli",
+        clientName: GATEWAY_CLIENT_NAMES.CLI,
+        mode: GATEWAY_CLIENT_MODES.CLI,
       }),
   );
 
@@ -865,7 +877,17 @@ function addGatewayRunCommand(
 
 export function registerGatewayCli(program: Command) {
   const gateway = addGatewayRunCommand(
-    program.command("gateway").description("Run the WebSocket Gateway"),
+    program
+      .command("gateway")
+      .description("Run the WebSocket Gateway")
+      .addHelpText(
+        "after",
+        () =>
+          `\n${theme.muted("Docs:")} ${formatDocsLink(
+            "/gateway",
+            "docs.clawd.bot/gateway",
+          )}\n`,
+      ),
   );
 
   // Back-compat: legacy launchd plists used gateway-daemon; keep hidden alias.
@@ -933,28 +955,12 @@ export function registerGatewayCli(program: Command) {
               durationMs != null ? ` (${durationMs}ms)` : ""
             }`,
           );
-          if (obj.web && typeof obj.web === "object") {
-            const web = obj.web as Record<string, unknown>;
-            const linked = web.linked === true;
-            defaultRuntime.log(
-              `Web: ${linked ? "linked" : "not linked"}${
-                typeof web.authAgeMs === "number" && linked
-                  ? ` (${Math.round(web.authAgeMs / 60_000)}m)`
-                  : ""
-              }`,
-            );
-          }
-          if (obj.telegram && typeof obj.telegram === "object") {
-            const tg = obj.telegram as Record<string, unknown>;
-            defaultRuntime.log(
-              `Telegram: ${tg.configured === true ? "configured" : "not configured"}`,
-            );
-          }
-          if (obj.discord && typeof obj.discord === "object") {
-            const dc = obj.discord as Record<string, unknown>;
-            defaultRuntime.log(
-              `Discord: ${dc.configured === true ? "configured" : "not configured"}`,
-            );
+          if (obj.providers && typeof obj.providers === "object") {
+            for (const line of formatHealthProviderLines(
+              obj as HealthSummary,
+            )) {
+              defaultRuntime.log(line);
+            }
           }
         } catch (err) {
           defaultRuntime.error(String(err));

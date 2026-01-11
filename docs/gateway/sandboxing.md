@@ -21,6 +21,8 @@ and process access when the model does something dumb.
 - Optional sandboxed browser (`agents.defaults.sandbox.browser`).
   - By default, the sandbox browser auto-starts (ensures CDP is reachable) when the browser tool needs it.
     Configure via `agents.defaults.sandbox.browser.autoStart` and `agents.defaults.sandbox.browser.autoStartTimeoutMs`.
+  - `agents.defaults.sandbox.browser.allowHostControl` lets sandboxed sessions target the host browser explicitly.
+  - Optional allowlists gate `target: "custom"`: `allowedControlUrls`, `allowedControlHosts`, `allowedControlPorts`.
 
 Not sandboxed:
 - The Gateway process itself.
@@ -78,6 +80,10 @@ Tool allow/deny policies still apply before sandbox rules. If a tool is denied
 globally or per-agent, sandboxing doesn’t bring it back.
 
 `tools.elevated` is an explicit escape hatch that runs `bash` on the host.
+
+Debugging:
+- Use `clawdbot sandbox explain` to inspect effective sandbox mode, tool policy, and fix-it config keys.
+- See [Sandbox vs Tool Policy vs Elevated](/gateway/sandbox-vs-tool-policy-vs-elevated) for the “why is this blocked?” mental model.
 Keep it locked down.
 
 ## Multi-agent overrides

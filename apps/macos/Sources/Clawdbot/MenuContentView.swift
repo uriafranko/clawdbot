@@ -153,6 +153,9 @@ struct MenuContent: View {
             self.micRefreshTask = nil
             self.micObserver.stop()
         }
+        .task { @MainActor in
+            SettingsWindowOpener.shared.register(openSettings: self.openSettings)
+        }
     }
 
     private var connectionLabel: String {
@@ -284,6 +287,11 @@ struct MenuContent: View {
                     }
                 }
                 Button {
+                    DebugActions.restartOnboarding()
+                } label: {
+                    Label("Restart Onboarding", systemImage: "arrow.counterclockwise")
+                }
+                Button {
                     DebugActions.restartApp()
                 } label: {
                     Label("Restart App", systemImage: "arrow.triangle.2.circlepath")
@@ -296,7 +304,9 @@ struct MenuContent: View {
         SettingsTabRouter.request(tab)
         NSApp.activate(ignoringOtherApps: true)
         self.openSettings()
-        NotificationCenter.default.post(name: .clawdbotSelectSettingsTab, object: tab)
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .clawdbotSelectSettingsTab, object: tab)
+        }
     }
 
     @MainActor

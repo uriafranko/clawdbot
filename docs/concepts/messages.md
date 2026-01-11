@@ -27,6 +27,12 @@ Key knobs live in configuration:
 
 See [Configuration](/gateway/configuration) for full schema.
 
+## Inbound dedupe
+
+Providers can redeliver the same message after reconnects. Clawdbot keeps a
+short-lived cache keyed by provider/account/peer/session/message id so duplicate
+deliveries do not trigger another agent run.
+
 ## Sessions and devices
 
 Sessions are owned by the gateway, not by clients.
@@ -40,6 +46,25 @@ conversations to avoid divergent context. The Control UI and TUI always show the
 gateway-backed session transcript, so they are the source of truth.
 
 Details: [Session management](/concepts/session).
+
+## Inbound bodies and history context
+
+Clawdbot separates the **prompt body** from the **command body**:
+- `Body`: prompt text sent to the agent. This may include provider envelopes and
+  optional history wrappers.
+- `CommandBody`: raw user text for directive/command parsing.
+- `RawBody`: legacy alias for `CommandBody` (kept for compatibility).
+
+When a provider supplies history, it uses a shared wrapper:
+- `[Chat messages since your last reply - for context]`
+- `[Current message - respond to this]`
+
+Directive stripping only applies to the **current message** section so history
+remains intact. Providers that wrap history should set `CommandBody` (or
+`RawBody`) to the original message text and keep `Body` as the combined prompt.
+History buffers are configurable via `messages.groupChat.historyLimit` (global
+default) and per-provider overrides like `slack.historyLimit` or
+`telegram.accounts.<id>.historyLimit` (set `0` to disable).
 
 ## Queueing and followups
 
@@ -61,6 +86,7 @@ Key settings:
 - `agents.defaults.blockStreamingBreak` (`text_end|message_end`)
 - `agents.defaults.blockStreamingChunk` (`minChars|maxChars|breakPreference`)
 - `agents.defaults.blockStreamingCoalesce` (idle-based batching)
+- `agents.defaults.humanDelay` (human-like pause between block replies)
 - Provider overrides: `*.blockStreaming` and `*.blockStreamingCoalesce` (non-Telegram providers require explicit `*.blockStreaming: true`)
 
 Details: [Streaming + chunking](/concepts/streaming).

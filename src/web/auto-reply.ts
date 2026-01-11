@@ -18,6 +18,10 @@ import {
   stripHeartbeatToken,
 } from "../auto-reply/heartbeat.js";
 import {
+  buildHistoryContext,
+  DEFAULT_GROUP_HISTORY_LIMIT,
+} from "../auto-reply/reply/history.js";
+import {
   buildMentionRegexes,
   normalizeMentionText,
 } from "../auto-reply/reply/mentions.js";
@@ -47,6 +51,7 @@ import { enqueueSystemEvent } from "../infra/system-events.js";
 import { registerUnhandledRejectionHandler } from "../infra/unhandled-rejections.js";
 import { createSubsystemLogger, getChildLogger } from "../logging.js";
 import { toLocationContext } from "../providers/location.js";
+import { resolveWhatsAppHeartbeatRecipients } from "../providers/plugins/whatsapp-heartbeat.js";
 import {
   buildAgentSessionKey,
   resolveAgentRoute,
@@ -64,7 +69,7 @@ import { resolveWhatsAppAccount } from "./accounts.js";
 import { setActiveWebListener } from "./active-listener.js";
 import { monitorWebInbox } from "./inbound.js";
 import { loadWebMedia } from "./media.js";
-import { sendMessageWhatsApp } from "./outbound.js";
+import { sendMessageWhatsApp, sendReactionWhatsApp } from "./outbound.js";
 import {
   computeBackoff,
   newConnectionId,
@@ -75,7 +80,6 @@ import {
 } from "./reconnect.js";
 import { formatError, getWebAuthAgeMs, readWebSelfId } from "./session.js";
 
-const DEFAULT_GROUP_HISTORY_LIMIT = 50;
 const whatsappLog = createSubsystemLogger("gateway/providers/whatsapp");
 const whatsappInboundLog = whatsappLog.child("inbound");
 const whatsappOutboundLog = whatsappLog.child("outbound");
@@ -175,6 +179,12 @@ type MentionConfig = {
   allowFrom?: Array<string | number>;
 };
 
+type MentionTargets = {
+  normalizedMentions: string[];
+  selfE164: string | null;
+  selfJid: string | null;
+};
+
 function buildMentionConfig(
   cfg: ReturnType<typeof loadConfig>,
   agentId?: string,
@@ -183,25 +193,42 @@ function buildMentionConfig(
   return { mentionRegexes, allowFrom: cfg.whatsapp?.allowFrom };
 }
 
-function isBotMentioned(
+function resolveMentionTargets(
+  msg: WebInboundMsg,
+  authDir?: string,
+): MentionTargets {
+  const jidOptions = authDir ? { authDir } : undefined;
+  const normalizedMentions = msg.mentionedJids?.length
+    ? msg.mentionedJids
+        .map((jid) => jidToE164(jid, jidOptions) ?? jid)
+        .filter(Boolean)
+    : [];
+  const selfE164 =
+    msg.selfE164 ?? (msg.selfJid ? jidToE164(msg.selfJid, jidOptions) : null);
+  const selfJid = msg.selfJid ? msg.selfJid.replace(/:\\d+/, "") : null;
+  return { normalizedMentions, selfE164, selfJid };
+}
+
+function isBotMentionedFromTargets(
   msg: WebInboundMsg,
   mentionCfg: MentionConfig,
+  targets: MentionTargets,
 ): boolean {
   const clean = (text: string) =>
     // Remove zero-width and directionality markers WhatsApp injects around display names
     normalizeMentionText(text);
 
-  const isSelfChat = isSelfChatMode(msg.selfE164, mentionCfg.allowFrom);
+  const isSelfChat = isSelfChatMode(targets.selfE164, mentionCfg.allowFrom);
 
   if (msg.mentionedJids?.length && !isSelfChat) {
-    const normalizedMentions = msg.mentionedJids
-      .map((jid) => jidToE164(jid) ?? jid)
-      .filter(Boolean);
-    if (msg.selfE164 && normalizedMentions.includes(msg.selfE164)) return true;
-    if (msg.selfJid && msg.selfE164) {
+    if (
+      targets.selfE164 &&
+      targets.normalizedMentions.includes(targets.selfE164)
+    )
+      return true;
+    if (targets.selfJid && targets.selfE164) {
       // Some mentions use the bare JID; match on E.164 to be safe.
-      const bareSelf = msg.selfJid.replace(/:\\d+/, "");
-      if (normalizedMentions.includes(bareSelf)) return true;
+      if (targets.normalizedMentions.includes(targets.selfJid)) return true;
     }
   } else if (msg.mentionedJids?.length && isSelfChat) {
     // Self-chat mode: ignore WhatsApp @mention JIDs, otherwise @mentioning the owner in group chats triggers the bot.
@@ -210,8 +237,8 @@ function isBotMentioned(
   if (mentionCfg.mentionRegexes.some((re) => re.test(bodyClean))) return true;
 
   // Fallback: detect body containing our own number (with or without +, spacing)
-  if (msg.selfE164) {
-    const selfDigits = msg.selfE164.replace(/\D/g, "");
+  if (targets.selfE164) {
+    const selfDigits = targets.selfE164.replace(/\D/g, "");
     if (selfDigits) {
       const bodyDigits = bodyClean.replace(/[^\d]/g, "");
       if (bodyDigits.includes(selfDigits)) return true;
@@ -227,15 +254,22 @@ function isBotMentioned(
 function debugMention(
   msg: WebInboundMsg,
   mentionCfg: MentionConfig,
+  authDir?: string,
 ): { wasMentioned: boolean; details: Record<string, unknown> } {
-  const result = isBotMentioned(msg, mentionCfg);
+  const mentionTargets = resolveMentionTargets(msg, authDir);
+  const result = isBotMentionedFromTargets(msg, mentionCfg, mentionTargets);
   const details = {
     from: msg.from,
     body: msg.body,
     bodyClean: normalizeMentionText(msg.body),
     mentionedJids: msg.mentionedJids ?? null,
+    normalizedMentionedJids: mentionTargets.normalizedMentions.length
+      ? mentionTargets.normalizedMentions
+      : null,
     selfJid: msg.selfJid ?? null,
+    selfJidBare: mentionTargets.selfJid,
     selfE164: msg.selfE164 ?? null,
+    resolvedSelfE164: mentionTargets.selfE164,
   };
   return { wasMentioned: result, details };
 }
@@ -462,71 +496,11 @@ export async function runWebHeartbeatOnce(opts: {
   }
 }
 
-function getSessionRecipients(cfg: ReturnType<typeof loadConfig>) {
-  const sessionCfg = cfg.session;
-  const scope = sessionCfg?.scope ?? "per-sender";
-  if (scope === "global") return [];
-  const storePath = resolveStorePath(cfg.session?.store);
-  const store = loadSessionStore(storePath);
-  const isGroupKey = (key: string) =>
-    key.startsWith("group:") ||
-    key.includes(":group:") ||
-    key.includes(":channel:") ||
-    key.includes("@g.us");
-  const isCronKey = (key: string) => key.startsWith("cron:");
-
-  const recipients = Object.entries(store)
-    .filter(([key]) => key !== "global" && key !== "unknown")
-    .filter(([key]) => !isGroupKey(key) && !isCronKey(key))
-    .map(([_, entry]) => ({
-      to:
-        entry?.lastProvider === "whatsapp" && entry?.lastTo
-          ? normalizeE164(entry.lastTo)
-          : "",
-      updatedAt: entry?.updatedAt ?? 0,
-    }))
-    .filter(({ to }) => to.length > 1)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-
-  // Dedupe while preserving recency ordering.
-  const seen = new Set<string>();
-  return recipients.filter((r) => {
-    if (seen.has(r.to)) return false;
-    seen.add(r.to);
-    return true;
-  });
-}
-
 export function resolveHeartbeatRecipients(
   cfg: ReturnType<typeof loadConfig>,
   opts: { to?: string; all?: boolean } = {},
 ) {
-  if (opts.to) return { recipients: [normalizeE164(opts.to)], source: "flag" };
-
-  const sessionRecipients = getSessionRecipients(cfg);
-  const allowFrom =
-    Array.isArray(cfg.whatsapp?.allowFrom) && cfg.whatsapp.allowFrom.length > 0
-      ? cfg.whatsapp.allowFrom.filter((v) => v !== "*").map(normalizeE164)
-      : [];
-
-  const unique = (list: string[]) => [...new Set(list.filter(Boolean))];
-
-  if (opts.all) {
-    const all = unique([...sessionRecipients.map((s) => s.to), ...allowFrom]);
-    return { recipients: all, source: "all" as const };
-  }
-
-  if (sessionRecipients.length === 1) {
-    return { recipients: [sessionRecipients[0].to], source: "session-single" };
-  }
-  if (sessionRecipients.length > 1) {
-    return {
-      recipients: sessionRecipients.map((s) => s.to),
-      source: "session-ambiguous" as const,
-    };
-  }
-
-  return { recipients: allowFrom, source: "allowFrom" as const };
+  return resolveWhatsAppHeartbeatRecipients(cfg, opts);
 }
 
 function getSessionSnapshot(
@@ -793,6 +767,7 @@ export async function monitorWebProvider(
     ...baseCfg,
     whatsapp: {
       ...baseCfg.whatsapp,
+      ackReaction: account.ackReaction,
       messagePrefix: account.messagePrefix,
       allowFrom: account.allowFrom,
       groupAllowFrom: account.groupAllowFrom,
@@ -817,10 +792,19 @@ export async function monitorWebProvider(
     buildMentionConfig(cfg, agentId);
   const baseMentionConfig = resolveMentionConfig();
   const groupHistoryLimit =
-    cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+    cfg.whatsapp?.accounts?.[tuning.accountId ?? ""]?.historyLimit ??
+    cfg.whatsapp?.historyLimit ??
+    cfg.messages?.groupChat?.historyLimit ??
+    DEFAULT_GROUP_HISTORY_LIMIT;
   const groupHistories = new Map<
     string,
-    Array<{ sender: string; body: string; timestamp?: number }>
+    Array<{
+      sender: string;
+      body: string;
+      timestamp?: number;
+      id?: string;
+      senderJid?: string;
+    }>
   >();
   const groupMemberNames = new Map<string, Map<string, string>>();
   const sleep =
@@ -1098,6 +1082,8 @@ export async function monitorWebProvider(
           sender: string;
           body: string;
           timestamp?: number;
+          id?: string;
+          senderJid?: string;
         }>;
         suppressGroupHistoryClear?: boolean;
       },
@@ -1115,20 +1101,25 @@ export async function monitorWebProvider(
         const historyWithoutCurrent =
           history.length > 0 ? history.slice(0, -1) : [];
         if (historyWithoutCurrent.length > 0) {
+          const lineBreak = "\\n";
           const historyText = historyWithoutCurrent
-            .map((m) =>
-              formatAgentEnvelope({
+            .map((m) => {
+              const bodyWithId = m.id
+                ? `${m.body}\n[message_id: ${m.id}]`
+                : m.body;
+              return formatAgentEnvelope({
                 provider: "WhatsApp",
                 from: conversationId,
                 timestamp: m.timestamp,
-                body: `${m.sender}: ${m.body}`,
-              }),
-            )
-            .join("\\n");
-          combinedBody = `[Chat messages since your last reply - for context]\\n${historyText}\\n\\n[Current message - respond to this]\\n${buildLine(
-            msg,
-            route.agentId,
-          )}`;
+                body: `${m.sender}: ${bodyWithId}`,
+              });
+            })
+            .join(lineBreak);
+          combinedBody = buildHistoryContext({
+            historyText,
+            currentMessage: buildLine(msg, route.agentId),
+            lineBreak,
+          });
         }
         // Always surface who sent the triggering message so the agent can address them.
         const senderLabel =
@@ -1148,6 +1139,64 @@ export async function monitorWebProvider(
         logVerbose(`Skipping auto-reply: detected echo for combined message`);
         recentlySent.delete(combinedEchoKey);
         return false;
+      }
+
+      // Send ack reaction immediately upon message receipt (post-gating)
+      if (msg.id) {
+        const ackConfig = cfg.whatsapp?.ackReaction;
+        const emoji = (ackConfig?.emoji ?? "").trim();
+        const directEnabled = ackConfig?.direct ?? true;
+        const groupMode = ackConfig?.group ?? "mentions";
+        const conversationIdForCheck = msg.conversationId ?? msg.from;
+
+        const shouldSendReaction = () => {
+          if (!emoji) return false;
+
+          if (msg.chatType === "direct") {
+            return directEnabled;
+          }
+
+          if (msg.chatType === "group") {
+            if (groupMode === "never") return false;
+            if (groupMode === "always") return true;
+            if (groupMode === "mentions") {
+              const activation = resolveGroupActivationFor({
+                agentId: route.agentId,
+                sessionKey: route.sessionKey,
+                conversationId: conversationIdForCheck,
+              });
+              if (activation === "always") return true;
+              return msg.wasMentioned === true;
+            }
+          }
+
+          return false;
+        };
+
+        if (shouldSendReaction()) {
+          replyLogger.info(
+            { chatId: msg.chatId, messageId: msg.id, emoji },
+            "sending ack reaction",
+          );
+          sendReactionWhatsApp(msg.chatId, msg.id, emoji, {
+            verbose,
+            fromMe: false,
+            participant: msg.senderJid,
+            accountId: route.accountId,
+          }).catch((err) => {
+            replyLogger.warn(
+              {
+                error: formatError(err),
+                chatId: msg.chatId,
+                messageId: msg.id,
+              },
+              "failed to send ack reaction",
+            );
+            logVerbose(
+              `WhatsApp ack reaction failed for chat ${msg.chatId}: ${formatError(err)}`,
+            );
+          });
+        }
       }
 
       const correlationId = msg.id ?? newConnectionId();
@@ -1221,6 +1270,8 @@ export async function monitorWebProvider(
       const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
         ctx: {
           Body: combinedBody,
+          RawBody: msg.body,
+          CommandBody: msg.body,
           From: msg.from,
           To: msg.to,
           SessionKey: route.sessionKey,
@@ -1240,6 +1291,7 @@ export async function monitorWebProvider(
             msg.senderE164,
           ),
           SenderName: msg.senderName,
+          SenderId: msg.senderJid ?? msg.senderE164,
           SenderE164: msg.senderE164,
           WasMentioned: msg.wasMentioned,
           ...(msg.location ? toLocationContext(msg.location) : {}),
@@ -1544,17 +1596,29 @@ export async function monitorWebProvider(
                 sender: string;
                 body: string;
                 timestamp?: number;
+                id?: string;
+                senderJid?: string;
               }>);
+            const sender =
+              msg.senderName && msg.senderE164
+                ? `${msg.senderName} (${msg.senderE164})`
+                : (msg.senderName ?? msg.senderE164 ?? "Unknown");
             history.push({
-              sender: msg.senderName ?? msg.senderE164 ?? "Unknown",
+              sender,
               body: msg.body,
               timestamp: msg.timestamp,
+              id: msg.id,
+              senderJid: msg.senderJid,
             });
             while (history.length > groupHistoryLimit) history.shift();
             groupHistories.set(groupHistoryKey, history);
           }
 
-          const mentionDebug = debugMention(msg, mentionConfig);
+          const mentionDebug = debugMention(
+            msg,
+            mentionConfig,
+            account.authDir,
+          );
           replyLogger.debug(
             {
               conversationId,

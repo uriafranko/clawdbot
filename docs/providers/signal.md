@@ -9,10 +9,30 @@ read_when:
 
 Status: external CLI integration. Gateway talks to `signal-cli` over HTTP JSON-RPC + SSE.
 
+## Quick setup (beginner)
+1) Use a **separate Signal number** for the bot (recommended).
+2) Install `signal-cli` (Java required).
+3) Link the bot device and start the daemon:
+   - `signal-cli link -n "Clawdbot"`
+4) Configure Clawdbot and start the gateway.
+
+Minimal config:
+```json5
+{
+  signal: {
+    enabled: true,
+    account: "+15551234567",
+    cliPath: "signal-cli",
+    dmPolicy: "pairing",
+    allowFrom: ["+15557654321"]
+  }
+}
+```
+
 ## What it is
 - Signal provider via `signal-cli` (not embedded libsignal).
 - Deterministic routing: replies always go back to Signal.
-- DMs share the agent's main session; groups are isolated (`signal:group:<groupId>`).
+- DMs share the agent's main session; groups are isolated (`agent:<agentId>:signal:group:<groupId>`).
 
 ## The number model (important)
 - The gateway connects to a **Signal device** (the `signal-cli` account).
@@ -45,8 +65,8 @@ DMs:
 - Default: `signal.dmPolicy = "pairing"`.
 - Unknown senders receive a pairing code; messages are ignored until approved (codes expire after 1 hour).
 - Approve via:
-  - `clawdbot pairing list --provider signal`
-  - `clawdbot pairing approve --provider signal <CODE>`
+  - `clawdbot pairing list signal`
+  - `clawdbot pairing approve signal <CODE>`
 - Pairing is the default token exchange for Signal DMs. Details: [Pairing](/start/pairing)
 - UUID-only senders (from `sourceUuid`) are stored as `uuid:<id>` in `signal.allowFrom`.
 
@@ -64,6 +84,7 @@ Groups:
 - Attachments supported (base64 fetched from `signal-cli`).
 - Default media cap: `signal.mediaMaxMb` (default 8).
 - Use `signal.ignoreAttachments` to skip downloading media.
+- Group history context uses `signal.historyLimit` (or `signal.accounts.*.historyLimit`), falling back to `messages.groupChat.historyLimit`. Set `0` to disable (default 50).
 
 ## Delivery targets (CLI/cron)
 - DMs: `signal:+15551234567` (or plain E.164).
@@ -88,6 +109,7 @@ Provider options:
 - `signal.allowFrom`: DM allowlist (E.164 or `uuid:<id>`). `open` requires `"*"`.
 - `signal.groupPolicy`: `open | allowlist | disabled` (default: open).
 - `signal.groupAllowFrom`: group sender allowlist.
+- `signal.historyLimit`: max group messages to include as context (0 disables).
 - `signal.textChunkLimit`: outbound chunk size (chars).
 - `signal.mediaMaxMb`: inbound/outbound media cap (MB).
 

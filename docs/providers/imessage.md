@@ -9,10 +9,28 @@ read_when:
 
 Status: external CLI integration. Gateway spawns `imsg rpc` (JSON-RPC over stdio).
 
+## Quick setup (beginner)
+1) Ensure Messages is signed in on this Mac.
+2) Install `imsg`:
+   - `brew install steipete/tap/imsg`
+3) Configure Clawdbot with `imessage.cliPath` and `imessage.dbPath`.
+4) Start the gateway and approve any macOS prompts (Automation + Full Disk Access).
+
+Minimal config:
+```json5
+{
+  imessage: {
+    enabled: true,
+    cliPath: "/usr/local/bin/imsg",
+    dbPath: "/Users/<you>/Library/Messages/chat.db"
+  }
+}
+```
+
 ## What it is
 - iMessage provider backed by `imsg` on macOS.
 - Deterministic routing: replies always go back to iMessage.
-- DMs share the agent's main session; groups are isolated (`imessage:group:<chat_id>`).
+- DMs share the agent's main session; groups are isolated (`agent:<agentId>:imessage:group:<chat_id>`).
 - If a multi-participant thread arrives with `is_group=false`, you can still isolate it by `chat_id` using `imessage.groups` (see “Group-ish threads” below).
 
 ## Requirements
@@ -86,8 +104,8 @@ DMs:
 - Default: `imessage.dmPolicy = "pairing"`.
 - Unknown senders receive a pairing code; messages are ignored until approved (codes expire after 1 hour).
 - Approve via:
-  - `clawdbot pairing list --provider imessage`
-  - `clawdbot pairing approve --provider imessage <CODE>`
+  - `clawdbot pairing list imessage`
+  - `clawdbot pairing approve imessage <CODE>`
 - Pairing is the default token exchange for iMessage DMs. Details: [Pairing](/start/pairing)
 
 Groups:
@@ -104,7 +122,7 @@ Groups:
 Some iMessage threads can have multiple participants but still arrive with `is_group=false` depending on how Messages stores the chat identifier.
 
 If you explicitly configure a `chat_id` under `imessage.groups`, Clawdbot treats that thread as a “group” for:
-- session isolation (separate `imessage:group:<chat_id>` session key)
+- session isolation (separate `agent:<agentId>:imessage:group:<chat_id>` session key)
 - group allowlisting / mention gating behavior
 
 Example:
@@ -154,6 +172,7 @@ Provider options:
 - `imessage.allowFrom`: DM allowlist (handles or `chat_id:*`). `open` requires `"*"`.
 - `imessage.groupPolicy`: `open | allowlist | disabled` (default: open).
 - `imessage.groupAllowFrom`: group sender allowlist.
+- `imessage.historyLimit` / `imessage.accounts.*.historyLimit`: max group messages to include as context (0 disables).
 - `imessage.groups`: per-group defaults + allowlist (use `"*"` for global defaults).
 - `imessage.includeAttachments`: ingest attachments into context.
 - `imessage.mediaMaxMb`: inbound/outbound media cap (MB).

@@ -17,6 +17,7 @@ vi.mock("../agents/pi-embedded.js", () => ({
 }));
 
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
+import { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
 import { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import { resetLogger, setLoggerOverride } from "../logging.js";
@@ -57,6 +58,7 @@ const rmDirWithRetries = async (dir: string): Promise<void> => {
 };
 
 beforeEach(async () => {
+  resetInboundDedupe();
   previousHome = process.env.HOME;
   tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-web-home-"));
   process.env.HOME = tempHome;
@@ -1127,9 +1129,155 @@ describe("web auto-reply", () => {
     expect(resolver).toHaveBeenCalledTimes(1);
     const payload = resolver.mock.calls[0][0];
     expect(payload.Body).toContain("Chat messages since your last reply");
-    expect(payload.Body).toContain("Alice: hello group");
+    expect(payload.Body).toContain("Alice (+111): hello group");
+    expect(payload.Body).toContain("[message_id: g1]");
     expect(payload.Body).toContain("@bot ping");
     expect(payload.Body).toContain("[from: Bob (+222)]");
+  });
+
+  it("detects LID mentions using authDir mapping", async () => {
+    const sendMedia = vi.fn();
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const sendComposing = vi.fn();
+    const resolver = vi.fn().mockResolvedValue({ text: "ok" });
+
+    let capturedOnMessage:
+      | ((msg: import("./inbound.js").WebInboundMessage) => Promise<void>)
+      | undefined;
+    const listenerFactory = async (opts: {
+      onMessage: (
+        msg: import("./inbound.js").WebInboundMessage,
+      ) => Promise<void>;
+    }) => {
+      capturedOnMessage = opts.onMessage;
+      return { close: vi.fn() };
+    };
+
+    const authDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "clawdbot-wa-auth-"),
+    );
+
+    try {
+      await fs.writeFile(
+        path.join(authDir, "lid-mapping-555_reverse.json"),
+        JSON.stringify("15551234"),
+      );
+
+      setLoadConfigMock(() => ({
+        whatsapp: {
+          allowFrom: ["*"],
+          accounts: {
+            default: { authDir },
+          },
+        },
+      }));
+
+      await monitorWebProvider(false, listenerFactory, false, resolver);
+      expect(capturedOnMessage).toBeDefined();
+
+      await capturedOnMessage?.({
+        body: "hello group",
+        from: "123@g.us",
+        conversationId: "123@g.us",
+        chatId: "123@g.us",
+        chatType: "group",
+        to: "+2",
+        id: "g1",
+        senderE164: "+111",
+        senderName: "Alice",
+        selfE164: "+15551234",
+        sendComposing,
+        reply,
+        sendMedia,
+      });
+
+      await capturedOnMessage?.({
+        body: "@bot ping",
+        from: "123@g.us",
+        conversationId: "123@g.us",
+        chatId: "123@g.us",
+        chatType: "group",
+        to: "+2",
+        id: "g2",
+        senderE164: "+222",
+        senderName: "Bob",
+        mentionedJids: ["555@lid"],
+        selfE164: "+15551234",
+        selfJid: "15551234@s.whatsapp.net",
+        sendComposing,
+        reply,
+        sendMedia,
+      });
+
+      expect(resolver).toHaveBeenCalledTimes(1);
+    } finally {
+      resetLoadConfigMock();
+      await rmDirWithRetries(authDir);
+    }
+  });
+
+  it("derives self E.164 from LID selfJid for mention gating", async () => {
+    const sendMedia = vi.fn();
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const sendComposing = vi.fn();
+    const resolver = vi.fn().mockResolvedValue({ text: "ok" });
+
+    let capturedOnMessage:
+      | ((msg: import("./inbound.js").WebInboundMessage) => Promise<void>)
+      | undefined;
+    const listenerFactory = async (opts: {
+      onMessage: (
+        msg: import("./inbound.js").WebInboundMessage,
+      ) => Promise<void>;
+    }) => {
+      capturedOnMessage = opts.onMessage;
+      return { close: vi.fn() };
+    };
+
+    const authDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "clawdbot-wa-auth-"),
+    );
+
+    try {
+      await fs.writeFile(
+        path.join(authDir, "lid-mapping-777_reverse.json"),
+        JSON.stringify("15550077"),
+      );
+
+      setLoadConfigMock(() => ({
+        whatsapp: {
+          allowFrom: ["*"],
+          accounts: {
+            default: { authDir },
+          },
+        },
+      }));
+
+      await monitorWebProvider(false, listenerFactory, false, resolver);
+      expect(capturedOnMessage).toBeDefined();
+
+      await capturedOnMessage?.({
+        body: "@bot ping",
+        from: "123@g.us",
+        conversationId: "123@g.us",
+        chatId: "123@g.us",
+        chatType: "group",
+        to: "+2",
+        id: "g3",
+        senderE164: "+333",
+        senderName: "Cara",
+        mentionedJids: ["777@lid"],
+        selfJid: "777@lid",
+        sendComposing,
+        reply,
+        sendMedia,
+      });
+
+      expect(resolver).toHaveBeenCalledTimes(1);
+    } finally {
+      resetLoadConfigMock();
+      await rmDirWithRetries(authDir);
+    }
   });
 
   it("sets OriginatingTo to the sender for queued routing", async () => {
@@ -1483,7 +1631,8 @@ describe("web auto-reply", () => {
     expect(resolver).toHaveBeenCalledTimes(2);
     const payload = resolver.mock.calls[1][0];
     expect(payload.Body).toContain("Chat messages since your last reply");
-    expect(payload.Body).toContain("Alice: first");
+    expect(payload.Body).toContain("Alice (+111): first");
+    expect(payload.Body).toContain("[message_id: g-always-1]");
     expect(payload.Body).toContain("Bob: second");
     expect(reply).toHaveBeenCalledTimes(1);
 
@@ -2213,7 +2362,8 @@ describe("broadcast groups", () => {
     for (const call of resolver.mock.calls.slice(0, 2)) {
       const payload = call[0] as { Body: string };
       expect(payload.Body).toContain("Chat messages since your last reply");
-      expect(payload.Body).toContain("Alice: hello group");
+      expect(payload.Body).toContain("Alice (+111): hello group");
+      expect(payload.Body).toContain("[message_id: g1]");
       expect(payload.Body).toContain("@bot ping");
       expect(payload.Body).toContain("[from: Bob (+222)]");
     }
@@ -2239,7 +2389,7 @@ describe("broadcast groups", () => {
     expect(resolver).toHaveBeenCalledTimes(4);
     for (const call of resolver.mock.calls.slice(2, 4)) {
       const payload = call[0] as { Body: string };
-      expect(payload.Body).not.toContain("Alice: hello group");
+      expect(payload.Body).not.toContain("Alice (+111): hello group");
       expect(payload.Body).not.toContain("Chat messages since your last reply");
     }
 

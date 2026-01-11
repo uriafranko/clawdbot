@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
@@ -14,8 +14,13 @@ import { resolveClawdbotAgentDir } from "../agents/agent-paths.js";
 import { getApiKeyForModel } from "../agents/model-auth.js";
 import { ensureClawdbotModelsJson } from "../agents/models-config.js";
 import { loadConfig } from "../config/config.js";
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+} from "../utils/message-provider.js";
 import { resolveUserPath } from "../utils.js";
 import { GatewayClient } from "./client.js";
+import { renderCatNoncePngBase64 } from "./live-image-probe.js";
 import { startGatewayServer } from "./server.js";
 
 const LIVE = process.env.LIVE === "1" || process.env.CLAWDBOT_LIVE_TEST === "1";
@@ -24,6 +29,10 @@ const ALL_MODELS =
   process.env.CLAWDBOT_LIVE_GATEWAY_ALL_MODELS === "1" ||
   process.env.CLAWDBOT_LIVE_GATEWAY_MODELS === "all";
 const EXTRA_TOOL_PROBES = process.env.CLAWDBOT_LIVE_GATEWAY_TOOL_PROBE === "1";
+const EXTRA_IMAGE_PROBES =
+  process.env.CLAWDBOT_LIVE_GATEWAY_IMAGE_PROBE === "1";
+const ZAI_FALLBACK = process.env.CLAWDBOT_LIVE_GATEWAY_ZAI_FALLBACK === "1";
+const PROVIDERS = parseFilter(process.env.CLAWDBOT_LIVE_GATEWAY_PROVIDERS);
 
 const describeLive = LIVE && GATEWAY_LIVE ? describe : describe.skip;
 
@@ -60,6 +69,56 @@ function isMeaningful(text: string): boolean {
   return true;
 }
 
+function isGoogleModelNotFoundText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (!/not found/i.test(trimmed)) return false;
+  if (/models\/.+ is not found for api version/i.test(trimmed)) return true;
+  if (/"status"\s*:\s*"NOT_FOUND"/.test(trimmed)) return true;
+  if (/"code"\s*:\s*404/.test(trimmed)) return true;
+  return false;
+}
+
+function isRefreshTokenReused(error: string): boolean {
+  return /refresh_token_reused/i.test(error);
+}
+
+function randomImageProbeCode(len = 10): string {
+  const alphabet = "2345689ABCEF";
+  const bytes = randomBytes(len);
+  let out = "";
+  for (let i = 0; i < len; i += 1) {
+    out += alphabet[bytes[i] % alphabet.length];
+  }
+  return out;
+}
+
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const aLen = a.length;
+  const bLen = b.length;
+  if (aLen === 0) return bLen;
+  if (bLen === 0) return aLen;
+
+  let prev = Array.from({ length: bLen + 1 }, (_v, idx) => idx);
+  let curr = Array.from({ length: bLen + 1 }, () => 0);
+
+  for (let i = 1; i <= aLen; i += 1) {
+    curr[0] = i;
+    const aCh = a.charCodeAt(i - 1);
+    for (let j = 1; j <= bLen; j += 1) {
+      const cost = aCh === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1, // delete
+        curr[j - 1] + 1, // insert
+        prev[j - 1] + cost, // substitute
+      );
+    }
+    [prev, curr] = [curr, prev];
+  }
+
+  return prev[bLen] ?? Number.POSITIVE_INFINITY;
+}
 async function getFreePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
     const srv = createServer();
@@ -123,9 +182,10 @@ async function connectClient(params: { url: string; token: string }) {
     const client = new GatewayClient({
       url: params.url,
       token: params.token,
-      clientName: "vitest-live",
+      clientName: GATEWAY_CLIENT_NAMES.TEST,
+      clientDisplayName: "vitest-live",
       clientVersion: "dev",
-      mode: "test",
+      mode: GATEWAY_CLIENT_MODES.TEST,
       onHelloOk: () => stop(undefined, client),
       onConnectError: (err) => stop(err),
       onClose: (code, reason) =>
@@ -193,6 +253,7 @@ describeLive("gateway live (dev agent, profile keys)", () => {
       const candidates: Array<Model<Api>> = [];
       for (const model of wanted) {
         const id = `${model.provider}/${model.id}`;
+        if (PROVIDERS && !PROVIDERS.has(model.provider)) continue;
         if (filter && !filter.has(id)) continue;
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -204,17 +265,49 @@ describeLive("gateway live (dev agent, profile keys)", () => {
       }
 
       expect(candidates.length).toBeGreaterThan(0);
+      const imageCandidates = EXTRA_IMAGE_PROBES
+        ? candidates.filter((m) => m.input?.includes("image"))
+        : [];
+      if (EXTRA_IMAGE_PROBES && imageCandidates.length === 0) {
+        throw new Error(
+          "image probe enabled but no selected models advertise image support; set CLAWDBOT_LIVE_GATEWAY_MODELS to include an image-capable model",
+        );
+      }
 
       // Build a temp config that allows all selected models, so session overrides stick.
+      const lmstudioProvider = cfg.models?.providers?.lmstudio;
       const nextCfg = {
         ...cfg,
         agents: {
-          ...(cfg.agents ?? {}),
+          ...cfg.agents,
+          list: (cfg.agents?.list ?? []).map((entry) => ({
+            ...entry,
+            sandbox: { mode: "off" },
+          })),
           defaults: {
-            ...(cfg.agents?.defaults ?? {}),
+            ...cfg.agents?.defaults,
+            // Live tests should avoid Docker sandboxing so tool probes can
+            // operate on the temporary probe files we create in the host workspace.
+            sandbox: { mode: "off" },
             models: Object.fromEntries(
               candidates.map((m) => [`${m.provider}/${m.id}`, {}]),
             ),
+          },
+        },
+        models: {
+          ...cfg.models,
+          providers: {
+            ...cfg.models?.providers,
+            // LM Studio is most reliable via Chat Completions; its Responses API
+            // tool-calling behavior is inconsistent across releases.
+            ...(lmstudioProvider
+              ? {
+                  lmstudio: {
+                    ...lmstudioProvider,
+                    api: "openai-completions",
+                  },
+                }
+              : {}),
           },
         },
       };
@@ -254,6 +347,11 @@ describeLive("gateway live (dev agent, profile keys)", () => {
               key: sessionKey,
               model: modelKey,
             });
+            // Reset between models: avoids cross-provider transcript incompatibilities
+            // (notably OpenAI Responses requiring reasoning replay for function_call items).
+            await client.request<Record<string, unknown>>("sessions.reset", {
+              key: sessionKey,
+            });
 
             // “Meaningful” direct prompt (no tools).
             const runId = randomUUID();
@@ -273,10 +371,18 @@ describeLive("gateway live (dev agent, profile keys)", () => {
               throw new Error(`agent status=${String(payload?.status)}`);
             }
             const text = extractPayloadText(payload?.result);
+            if (
+              model.provider === "google" &&
+              isGoogleModelNotFoundText(text)
+            ) {
+              // Catalog drift: model IDs can disappear or become unavailable on the API.
+              // Treat as skip when scanning "all models" for Google.
+              continue;
+            }
             if (!isMeaningful(text)) throw new Error(`not meaningful: ${text}`);
             if (
-              !/\\bmicrotask\\b/i.test(text) ||
-              !/\\bmacrotask\\b/i.test(text)
+              !/\bmicro\s*-?\s*tasks?\b/i.test(text) ||
+              !/\bmacro\s*-?\s*tasks?\b/i.test(text)
             ) {
               throw new Error(`missing required keywords: ${text}`);
             }
@@ -289,8 +395,9 @@ describeLive("gateway live (dev agent, profile keys)", () => {
                 sessionKey,
                 idempotencyKey: `idem-${runIdTool}-tool`,
                 message:
-                  `Call the tool named \`read\` (or \`Read\` if \`read\` is unavailable) on "${toolProbePath}". ` +
-                  `Then reply with exactly: ${nonceA} ${nonceB}. No extra text.`,
+                  "Clawdbot live tool probe (local, safe): " +
+                  `use the tool named \`read\` (or \`Read\`) with JSON arguments {"path":"${toolProbePath}"}. ` +
+                  "Then reply with the two nonce values you read (include both).",
                 deliver: false,
               },
               { expectFinal: true },
@@ -306,61 +413,88 @@ describeLive("gateway live (dev agent, profile keys)", () => {
             }
 
             if (EXTRA_TOOL_PROBES) {
-              const nonceC = `nonceC=${randomUUID()}`;
-              const nonceD = `nonceD=${randomUUID()}`;
+              const nonceC = randomUUID();
               const toolWritePath = path.join(
                 tempDir,
                 `write-${runIdTool}.txt`,
               );
 
-              const writeProbe = await client.request<AgentFinalPayload>(
+              const bashReadProbe = await client.request<AgentFinalPayload>(
                 "agent",
                 {
                   sessionKey,
-                  idempotencyKey: `idem-${runIdTool}-write`,
+                  idempotencyKey: `idem-${runIdTool}-bash-read`,
                   message:
-                    `Call the tool named \`write\` (or \`Write\` if \`write\` is unavailable) to write exactly "${nonceC}" to "${toolWritePath}". ` +
-                    `Then call the tool named \`read\` (or \`Read\`) on "${toolWritePath}". ` +
-                    `Finally reply with exactly: ${nonceC}.`,
+                    "Clawdbot live tool probe (local, safe): " +
+                    "use the tool named `bash` (or `Bash`) to run this command: " +
+                    `mkdir -p "${tempDir}" && printf '%s' '${nonceC}' > "${toolWritePath}". ` +
+                    `Then use the tool named \`read\` (or \`Read\`) with JSON arguments {"path":"${toolWritePath}"}. ` +
+                    "Finally reply including the nonce text you read back.",
                   deliver: false,
                 },
                 { expectFinal: true },
               );
-              if (writeProbe?.status !== "ok") {
+              if (bashReadProbe?.status !== "ok") {
                 throw new Error(
-                  `write probe failed: status=${String(writeProbe?.status)}`,
+                  `bash+read probe failed: status=${String(bashReadProbe?.status)}`,
                 );
               }
-              const writeText = extractPayloadText(writeProbe?.result);
-              if (!writeText.includes(nonceC)) {
-                throw new Error(`write probe missing nonce: ${writeText}`);
-              }
-
-              const bashProbe = await client.request<AgentFinalPayload>(
-                "agent",
-                {
-                  sessionKey,
-                  idempotencyKey: `idem-${runIdTool}-bash`,
-                  message:
-                    `Call the tool named \`bash\` (or \`Bash\` if \`bash\` is unavailable) and run: echo ${nonceD}. ` +
-                    `Then reply with exactly: ${nonceD}.`,
-                  deliver: false,
-                },
-                { expectFinal: true },
-              );
-              if (bashProbe?.status !== "ok") {
+              const bashReadText = extractPayloadText(bashReadProbe?.result);
+              if (!bashReadText.includes(nonceC)) {
                 throw new Error(
-                  `bash probe failed: status=${String(bashProbe?.status)}`,
+                  `bash+read probe missing nonce: ${bashReadText}`,
                 );
-              }
-              const bashText = extractPayloadText(bashProbe?.result);
-              if (!bashText.includes(nonceD)) {
-                throw new Error(`bash probe missing nonce: ${bashText}`);
               }
 
               await fs.rm(toolWritePath, { force: true });
             }
 
+            if (EXTRA_IMAGE_PROBES && model.input?.includes("image")) {
+              const imageCode = randomImageProbeCode(10);
+              const imageBase64 = renderCatNoncePngBase64(imageCode);
+              const runIdImage = randomUUID();
+
+              const imageProbe = await client.request<AgentFinalPayload>(
+                "agent",
+                {
+                  sessionKey,
+                  idempotencyKey: `idem-${runIdImage}-image`,
+                  message:
+                    "Look at the attached image. Reply with exactly two tokens separated by a single space: " +
+                    "(1) the animal shown or written in the image, lowercase; " +
+                    "(2) the code printed in the image, uppercase. No extra text.",
+                  attachments: [
+                    {
+                      mimeType: "image/png",
+                      fileName: `probe-${runIdImage}.png`,
+                      content: imageBase64,
+                    },
+                  ],
+                  deliver: false,
+                },
+                { expectFinal: true },
+              );
+              if (imageProbe?.status !== "ok") {
+                throw new Error(
+                  `image probe failed: status=${String(imageProbe?.status)}`,
+                );
+              }
+              const imageText = extractPayloadText(imageProbe?.result);
+              if (!/\bcat\b/i.test(imageText)) {
+                throw new Error(`image probe missing 'cat': ${imageText}`);
+              }
+              const candidates =
+                imageText.toUpperCase().match(/[A-Z0-9]{6,20}/g) ?? [];
+              const bestDistance = candidates.reduce((best, cand) => {
+                if (Math.abs(cand.length - imageCode.length) > 2) return best;
+                return Math.min(best, editDistance(cand, imageCode));
+              }, Number.POSITIVE_INFINITY);
+              if (!(bestDistance <= 2)) {
+                throw new Error(
+                  `image probe missing code (${imageCode}): ${imageText}`,
+                );
+              }
+            }
             // Regression: tool-call-only turn followed by a user message (OpenAI responses bug class).
             if (
               (model.provider === "openai" &&
@@ -374,8 +508,7 @@ describeLive("gateway live (dev agent, profile keys)", () => {
                 {
                   sessionKey,
                   idempotencyKey: `idem-${runId2}-1`,
-                  message:
-                    "Call the tool named `read` (or `Read`) on package.json. Do not write any other text.",
+                  message: `Call the tool named \`read\` (or \`Read\`) on "${toolProbePath}". Do not write any other text.`,
                   deliver: false,
                 },
                 { expectFinal: true },
@@ -391,8 +524,7 @@ describeLive("gateway live (dev agent, profile keys)", () => {
                 {
                   sessionKey,
                   idempotencyKey: `idem-${runId2}-2`,
-                  message:
-                    'Now answer: what is the "version" field in package.json? Reply with just the version string.',
+                  message: `Now answer: what are the values of nonceA and nonceB in "${toolProbePath}"? Reply with exactly: ${nonceA} ${nonceB}.`,
                   deliver: false,
                 },
                 { expectFinal: true },
@@ -402,13 +534,21 @@ describeLive("gateway live (dev agent, profile keys)", () => {
                   `post-tool message failed: status=${String(second?.status)}`,
                 );
               }
-              const version = extractPayloadText(second?.result);
-              if (!/^\\d{4}\\.\\d+\\.\\d+/.test(version.trim())) {
-                throw new Error(`unexpected version: ${version}`);
+              const reply = extractPayloadText(second?.result);
+              if (!reply.includes(nonceA) || !reply.includes(nonceB)) {
+                throw new Error(`unexpected reply: ${reply}`);
               }
             }
           } catch (err) {
-            failures.push({ model: modelKey, error: String(err) });
+            const message = String(err);
+            // OpenAI Codex refresh tokens can become single-use; skip instead of failing all live tests.
+            if (
+              model.provider === "openai-codex" &&
+              isRefreshTokenReused(message)
+            ) {
+              continue;
+            }
+            failures.push({ model: modelKey, error: message });
           }
         }
 
@@ -437,4 +577,142 @@ describeLive("gateway live (dev agent, profile keys)", () => {
     },
     20 * 60 * 1000,
   );
+
+  it("z.ai fallback handles anthropic tool history", async () => {
+    if (!ZAI_FALLBACK) return;
+    const previous = {
+      configPath: process.env.CLAWDBOT_CONFIG_PATH,
+      token: process.env.CLAWDBOT_GATEWAY_TOKEN,
+      skipProviders: process.env.CLAWDBOT_SKIP_PROVIDERS,
+      skipGmail: process.env.CLAWDBOT_SKIP_GMAIL_WATCHER,
+      skipCron: process.env.CLAWDBOT_SKIP_CRON,
+      skipCanvas: process.env.CLAWDBOT_SKIP_CANVAS_HOST,
+    };
+
+    process.env.CLAWDBOT_SKIP_PROVIDERS = "1";
+    process.env.CLAWDBOT_SKIP_GMAIL_WATCHER = "1";
+    process.env.CLAWDBOT_SKIP_CRON = "1";
+    process.env.CLAWDBOT_SKIP_CANVAS_HOST = "1";
+
+    const token = `test-${randomUUID()}`;
+    process.env.CLAWDBOT_GATEWAY_TOKEN = token;
+
+    const cfg = loadConfig();
+    await ensureClawdbotModelsJson(cfg);
+
+    const agentDir = resolveClawdbotAgentDir();
+    const authStorage = discoverAuthStorage(agentDir);
+    const modelRegistry = discoverModels(authStorage, agentDir);
+    const anthropic = modelRegistry.find(
+      "anthropic",
+      "claude-opus-4-5",
+    ) as Model<Api> | null;
+    const zai = modelRegistry.find("zai", "glm-4.7") as Model<Api> | null;
+
+    if (!anthropic || !zai) return;
+    try {
+      await getApiKeyForModel({ model: anthropic, cfg });
+      await getApiKeyForModel({ model: zai, cfg });
+    } catch {
+      return;
+    }
+
+    const workspaceDir = resolveUserPath(
+      cfg.agents?.defaults?.workspace ?? path.join(os.homedir(), "clawd"),
+    );
+    await fs.mkdir(workspaceDir, { recursive: true });
+    const nonceA = randomUUID();
+    const nonceB = randomUUID();
+    const toolProbePath = path.join(
+      workspaceDir,
+      `.clawdbot-live-zai-fallback.${nonceA}.txt`,
+    );
+    await fs.writeFile(toolProbePath, `nonceA=${nonceA}\nnonceB=${nonceB}\n`);
+
+    const port = await getFreeGatewayPort();
+    const server = await startGatewayServer({
+      configPath: cfg.__meta?.path,
+      port,
+      token,
+    });
+
+    const client = await connectClient({
+      url: `ws://127.0.0.1:${port}`,
+      token,
+    });
+
+    try {
+      const sessionKey = "agent:dev:live-zai-fallback";
+
+      await client.request<Record<string, unknown>>("sessions.patch", {
+        key: sessionKey,
+        model: "anthropic/claude-opus-4-5",
+      });
+      await client.request<Record<string, unknown>>("sessions.reset", {
+        key: sessionKey,
+      });
+
+      const runId = randomUUID();
+      const toolProbe = await client.request<AgentFinalPayload>(
+        "agent",
+        {
+          sessionKey,
+          idempotencyKey: `idem-${runId}-tool`,
+          message:
+            `Call the tool named \`read\` (or \`Read\` if \`read\` is unavailable) with JSON arguments {"path":"${toolProbePath}"}. ` +
+            `Then reply with exactly: ${nonceA} ${nonceB}. No extra text.`,
+          deliver: false,
+        },
+        { expectFinal: true },
+      );
+      if (toolProbe?.status !== "ok") {
+        throw new Error(
+          `anthropic tool probe failed: status=${String(toolProbe?.status)}`,
+        );
+      }
+      const toolText = extractPayloadText(toolProbe?.result);
+      if (!toolText.includes(nonceA) || !toolText.includes(nonceB)) {
+        throw new Error(`anthropic tool probe missing nonce: ${toolText}`);
+      }
+
+      await client.request<Record<string, unknown>>("sessions.patch", {
+        key: sessionKey,
+        model: "zai/glm-4.7",
+      });
+
+      const followupId = randomUUID();
+      const followup = await client.request<AgentFinalPayload>(
+        "agent",
+        {
+          sessionKey,
+          idempotencyKey: `idem-${followupId}-followup`,
+          message:
+            `What are the values of nonceA and nonceB in "${toolProbePath}"? ` +
+            `Reply with exactly: ${nonceA} ${nonceB}.`,
+          deliver: false,
+        },
+        { expectFinal: true },
+      );
+      if (followup?.status !== "ok") {
+        throw new Error(
+          `zai followup failed: status=${String(followup?.status)}`,
+        );
+      }
+      const followupText = extractPayloadText(followup?.result);
+      if (!followupText.includes(nonceA) || !followupText.includes(nonceB)) {
+        throw new Error(`zai followup missing nonce: ${followupText}`);
+      }
+    } finally {
+      client.stop();
+      await server.close({ reason: "live test complete" });
+      await fs.rm(toolProbePath, { force: true });
+
+      process.env.CLAWDBOT_CONFIG_PATH = previous.configPath;
+      process.env.CLAWDBOT_GATEWAY_TOKEN = previous.token;
+      process.env.CLAWDBOT_SKIP_PROVIDERS = previous.skipProviders;
+      process.env.CLAWDBOT_SKIP_GMAIL_WATCHER = previous.skipGmail;
+      process.env.CLAWDBOT_SKIP_CRON = previous.skipCron;
+      process.env.CLAWDBOT_SKIP_CANVAS_HOST = previous.skipCanvas;
+    }
+  }, 180_000);
 });

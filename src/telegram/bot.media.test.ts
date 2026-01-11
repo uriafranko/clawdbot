@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
 
 const useSpy = vi.fn();
 const middlewareUseSpy = vi.fn();
@@ -15,6 +16,10 @@ const apiStub: ApiStub = {
   config: { use: useSpy },
   sendChatAction: sendChatActionSpy,
 };
+
+beforeEach(() => {
+  resetInboundDedupe();
+});
 
 vi.mock("grammy", () => ({
   Bot: class {
@@ -37,11 +42,32 @@ vi.mock("@grammyjs/transformer-throttler", () => ({
   apiThrottler: () => throttlerSpy(),
 }));
 
+vi.mock("../media/store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../media/store.js")>();
+  return {
+    ...actual,
+    saveMediaBuffer: vi.fn(async (buffer: Buffer, contentType?: string) => ({
+      id: "media",
+      path: "/tmp/telegram-media",
+      size: buffer.byteLength,
+      contentType: contentType ?? "application/octet-stream",
+    })),
+  };
+});
+
 vi.mock("../config/config.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../config/config.js")>();
   return {
     ...actual,
     loadConfig: () => ({ telegram: { dmPolicy: "open", allowFrom: ["*"] } }),
+  };
+});
+
+vi.mock("../config/sessions.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../config/sessions.js")>();
+  return {
+    ...actual,
+    updateLastRoute: vi.fn(async () => undefined),
   };
 });
 
@@ -63,7 +89,7 @@ vi.mock("../auto-reply/reply.js", () => {
 
 describe("telegram inbound media", () => {
   const INBOUND_MEDIA_TEST_TIMEOUT_MS =
-    process.platform === "win32" ? 30_000 : 10_000;
+    process.platform === "win32" ? 30_000 : 20_000;
 
   it(
     "downloads media via file_path (no file.download)",

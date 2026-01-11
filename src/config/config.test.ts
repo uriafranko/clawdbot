@@ -240,6 +240,57 @@ describe("config identity defaults", () => {
     });
   });
 
+  it("accepts blank model provider apiKey values", async () => {
+    await withTempHome(async (home) => {
+      const configDir = path.join(home, ".clawdbot");
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(
+        path.join(configDir, "clawdbot.json"),
+        JSON.stringify(
+          {
+            models: {
+              mode: "merge",
+              providers: {
+                minimax: {
+                  baseUrl: "https://api.minimax.io/anthropic",
+                  apiKey: "",
+                  api: "anthropic-messages",
+                  models: [
+                    {
+                      id: "MiniMax-M2.1",
+                      name: "MiniMax M2.1",
+                      reasoning: false,
+                      input: ["text"],
+                      cost: {
+                        input: 0,
+                        output: 0,
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                      },
+                      contextWindow: 200000,
+                      maxTokens: 8192,
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+
+      vi.resetModules();
+      const { loadConfig } = await import("./config.js");
+      const cfg = loadConfig();
+
+      expect(cfg.models?.providers?.minimax?.baseUrl).toBe(
+        "https://api.minimax.io/anthropic",
+      );
+    });
+  });
+
   it("respects empty responsePrefix to disable identity defaults", async () => {
     await withTempHome(async (home) => {
       const configDir = path.join(home, ".clawdbot");
@@ -924,7 +975,10 @@ describe("legacy config detection", () => {
       routing: {
         agentToAgent: { enabled: true, allow: ["main"] },
         queue: { mode: "queue", cap: 3 },
-        transcribeAudio: { command: ["echo", "hi"], timeoutSeconds: 2 },
+        transcribeAudio: {
+          command: ["whisper", "--model", "base"],
+          timeoutSeconds: 2,
+        },
       },
     });
     expect(res.changes).toContain(
@@ -932,7 +986,7 @@ describe("legacy config detection", () => {
     );
     expect(res.changes).toContain("Moved routing.queue → messages.queue.");
     expect(res.changes).toContain(
-      "Moved routing.transcribeAudio → audio.transcription.",
+      "Moved routing.transcribeAudio → tools.audio.transcription.",
     );
     expect(res.config?.tools?.agentToAgent).toEqual({
       enabled: true,
@@ -942,8 +996,8 @@ describe("legacy config detection", () => {
       mode: "queue",
       cap: 3,
     });
-    expect(res.config?.audio?.transcription).toEqual({
-      command: ["echo", "hi"],
+    expect(res.config?.tools?.audio?.transcription).toEqual({
+      args: ["--model", "base"],
       timeoutSeconds: 2,
     });
     expect(res.config?.routing).toBeUndefined();
@@ -1174,6 +1228,34 @@ describe("legacy config detection", () => {
     }
   });
 
+  it("accepts historyLimit overrides per provider and account", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      messages: { groupChat: { historyLimit: 12 } },
+      whatsapp: { historyLimit: 9, accounts: { work: { historyLimit: 4 } } },
+      telegram: { historyLimit: 8, accounts: { ops: { historyLimit: 3 } } },
+      slack: { historyLimit: 7, accounts: { ops: { historyLimit: 2 } } },
+      signal: { historyLimit: 6 },
+      imessage: { historyLimit: 5 },
+      msteams: { historyLimit: 4 },
+      discord: { historyLimit: 3 },
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.config.whatsapp?.historyLimit).toBe(9);
+      expect(res.config.whatsapp?.accounts?.work?.historyLimit).toBe(4);
+      expect(res.config.telegram?.historyLimit).toBe(8);
+      expect(res.config.telegram?.accounts?.ops?.historyLimit).toBe(3);
+      expect(res.config.slack?.historyLimit).toBe(7);
+      expect(res.config.slack?.accounts?.ops?.historyLimit).toBe(2);
+      expect(res.config.signal?.historyLimit).toBe(6);
+      expect(res.config.imessage?.historyLimit).toBe(5);
+      expect(res.config.msteams?.historyLimit).toBe(4);
+      expect(res.config.discord?.historyLimit).toBe(3);
+    }
+  });
+
   it('rejects imessage.dmPolicy="open" without allowFrom "*"', async () => {
     vi.resetModules();
     const { validateConfigObject } = await import("./config.js");
@@ -1206,6 +1288,44 @@ describe("legacy config detection", () => {
     if (res.ok) {
       expect(res.config.imessage?.dmPolicy).toBe("pairing");
     }
+  });
+
+  it("rejects unsafe executable config values", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      imessage: { cliPath: "imsg; rm -rf /" },
+      tools: { audio: { transcription: { args: ["--model", "base"] } } },
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "imessage.cliPath")).toBe(true);
+    }
+  });
+
+  it("accepts tools audio transcription without cli", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      tools: { audio: { transcription: { args: ["--model", "base"] } } },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts path-like executable values with spaces", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      imessage: { cliPath: "/Applications/Imsg Tools/imsg" },
+      tools: {
+        audio: {
+          transcription: {
+            args: ["--model"],
+          },
+        },
+      },
+    });
+    expect(res.ok).toBe(true);
   });
 
   it('rejects discord.dm.policy="open" without allowFrom "*"', async () => {

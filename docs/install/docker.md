@@ -43,6 +43,11 @@ This script:
 - starts the gateway via Docker Compose
 - generates a gateway token and writes it to `.env`
 
+Optional env vars:
+- `CLAWDBOT_DOCKER_APT_PACKAGES` — install extra apt packages during build
+- `CLAWDBOT_EXTRA_MOUNTS` — add extra host bind mounts
+- `CLAWDBOT_HOME_VOLUME` — persist `/home/node` in a named volume
+
 After it finishes:
 - Open `http://127.0.0.1:18789/` in your browser.
 - Paste the token into the Control UI (Settings → token).
@@ -60,6 +65,73 @@ docker build -t clawdbot:local -f Dockerfile .
 docker compose run --rm clawdbot-cli onboard
 docker compose up -d clawdbot-gateway
 ```
+
+### Extra mounts (optional)
+
+If you want to mount additional host directories into the containers, set
+`CLAWDBOT_EXTRA_MOUNTS` before running `docker-setup.sh`. This accepts a
+comma-separated list of Docker bind mounts and applies them to both
+`clawdbot-gateway` and `clawdbot-cli` by generating `docker-compose.extra.yml`.
+
+Example:
+
+```bash
+export CLAWDBOT_EXTRA_MOUNTS="$HOME/.codex:/home/node/.codex:ro,$HOME/github:/home/node/github:rw"
+./docker-setup.sh
+```
+
+Notes:
+- Paths must be shared with Docker Desktop on macOS/Windows.
+- If you edit `CLAWDBOT_EXTRA_MOUNTS`, rerun `docker-setup.sh` to regenerate the
+  extra compose file.
+- `docker-compose.extra.yml` is generated. Don’t hand-edit it.
+
+### Persist the entire container home (optional)
+
+If you want `/home/node` to persist across container recreation, set a named
+volume via `CLAWDBOT_HOME_VOLUME`. This creates a Docker volume and mounts it at
+`/home/node`, while keeping the standard config/workspace bind mounts. Use a
+named volume here (not a bind path); for bind mounts, use
+`CLAWDBOT_EXTRA_MOUNTS`.
+
+Example:
+
+```bash
+export CLAWDBOT_HOME_VOLUME="clawdbot_home"
+./docker-setup.sh
+```
+
+You can combine this with extra mounts:
+
+```bash
+export CLAWDBOT_HOME_VOLUME="clawdbot_home"
+export CLAWDBOT_EXTRA_MOUNTS="$HOME/.codex:/home/node/.codex:ro,$HOME/github:/home/node/github:rw"
+./docker-setup.sh
+```
+
+Notes:
+- If you change `CLAWDBOT_HOME_VOLUME`, rerun `docker-setup.sh` to regenerate the
+  extra compose file.
+- The named volume persists until removed with `docker volume rm <name>`.
+
+### Install extra apt packages (optional)
+
+If you need system packages inside the image (for example, build tools or media
+libraries), set `CLAWDBOT_DOCKER_APT_PACKAGES` before running `docker-setup.sh`.
+This installs the packages during the image build, so they persist even if the
+container is deleted.
+
+Example:
+
+```bash
+export CLAWDBOT_DOCKER_APT_PACKAGES="ffmpeg build-essential"
+./docker-setup.sh
+```
+
+Notes:
+- This accepts a space-separated list of apt package names.
+- If you change `CLAWDBOT_DOCKER_APT_PACKAGES`, rerun `docker-setup.sh` to rebuild
+  the image.
 
 ### Faster rebuilds (recommended)
 

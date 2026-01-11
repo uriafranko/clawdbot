@@ -1,14 +1,19 @@
-import type { ThinkLevel } from "../auto-reply/thinking.js";
+import type { ReasoningLevel, ThinkLevel } from "../auto-reply/thinking.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import { PROVIDER_IDS } from "../providers/registry.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
+
+const MESSAGE_PROVIDER_OPTIONS = PROVIDER_IDS.join("|");
 
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
+  reasoningLevel?: ReasoningLevel;
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
   reasoningTagHint?: boolean;
   toolNames?: string[];
+  toolSummaries?: Record<string, string>;
   modelAliasLines?: string[];
   userTimezone?: string;
   userTime?: string;
@@ -31,9 +36,17 @@ export function buildAgentSystemPrompt(params: {
     agentWorkspaceMount?: string;
     browserControlUrl?: string;
     browserNoVncUrl?: string;
+    hostBrowserAllowed?: boolean;
+    allowedControlUrls?: string[];
+    allowedControlHosts?: string[];
+    allowedControlPorts?: number[];
+    elevated?: {
+      allowed: boolean;
+      defaultLevel: "on" | "off";
+    };
   };
 }) {
-  const toolSummaries: Record<string, string> = {
+  const coreToolSummaries: Record<string, string> = {
     read: "Read file contents",
     write: "Create or overwrite files",
     edit: "Make precise edits to files",
@@ -42,7 +55,7 @@ export function buildAgentSystemPrompt(params: {
     ls: "List directory contents",
     bash: "Run shell commands",
     process: "Manage background bash sessions",
-    whatsapp_login: "Generate and wait for WhatsApp QR login",
+    // Provider docking: add provider login tools here when a provider needs interactive linking.
     browser: "Control web browser",
     canvas: "Present/eval/snapshot the Canvas",
     nodes: "List/describe/notify/camera/screen on paired nodes",
@@ -56,7 +69,7 @@ export function buildAgentSystemPrompt(params: {
     sessions_send: "Send a message to another session/sub-agent",
     sessions_spawn: "Spawn a sub-agent session",
     session_status:
-      "Show a /status-equivalent status card (includes usage + cost when available); optional per-session model override",
+      "Show a /status-equivalent status card (usage/cost + Reasoning/Verbose/Elevated); optional per-session model override",
     image: "Analyze an image with the configured image model",
   };
 
@@ -69,7 +82,6 @@ export function buildAgentSystemPrompt(params: {
     "ls",
     "bash",
     "process",
-    "whatsapp_login",
     "browser",
     "canvas",
     "nodes",
@@ -98,17 +110,25 @@ export function buildAgentSystemPrompt(params: {
 
   const normalizedTools = canonicalToolNames.map((tool) => tool.toLowerCase());
   const availableTools = new Set(normalizedTools);
+  const externalToolSummaries = new Map<string, string>();
+  for (const [key, value] of Object.entries(params.toolSummaries ?? {})) {
+    const normalized = key.trim().toLowerCase();
+    if (!normalized || !value?.trim()) continue;
+    externalToolSummaries.set(normalized, value.trim());
+  }
   const extraTools = Array.from(
     new Set(normalizedTools.filter((tool) => !toolOrder.includes(tool))),
   );
   const enabledTools = toolOrder.filter((tool) => availableTools.has(tool));
   const toolLines = enabledTools.map((tool) => {
-    const summary = toolSummaries[tool];
+    const summary = coreToolSummaries[tool] ?? externalToolSummaries.get(tool);
     const name = resolveToolName(tool);
     return summary ? `- ${name}: ${summary}` : `- ${name}`;
   });
   for (const tool of extraTools.sort()) {
-    toolLines.push(`- ${resolveToolName(tool)}`);
+    const summary = coreToolSummaries[tool] ?? externalToolSummaries.get(tool);
+    const name = resolveToolName(tool);
+    toolLines.push(summary ? `- ${name}: ${summary}` : `- ${name}`);
   }
 
   const hasGateway = availableTools.has("gateway");
@@ -135,6 +155,7 @@ export function buildAgentSystemPrompt(params: {
         "<final>Hey there! What would you like to do next?</final>",
       ].join(" ")
     : undefined;
+  const reasoningLevel = params.reasoningLevel ?? "off";
   const userTimezone = params.userTimezone?.trim();
   const userTime = params.userTime?.trim();
   const skillsPrompt = params.skillsPrompt?.trim();
@@ -150,9 +171,7 @@ export function buildAgentSystemPrompt(params: {
   const runtimeCapabilitiesLower = new Set(
     runtimeCapabilities.map((cap) => cap.toLowerCase()),
   );
-  const telegramInlineButtonsEnabled =
-    runtimeProvider === "telegram" &&
-    runtimeCapabilitiesLower.has("inlinebuttons");
+  const inlineButtonsEnabled = runtimeCapabilitiesLower.has("inlinebuttons");
   const skillsLines = skillsPrompt ? [skillsPrompt, ""] : [];
   const skillsSection = skillsPrompt
     ? [
@@ -178,7 +197,6 @@ export function buildAgentSystemPrompt(params: {
           "- ls: list directory contents",
           `- ${bashToolName}: run shell commands (supports background via yieldMs/background)`,
           `- ${processToolName}: manage background bash sessions`,
-          "- whatsapp_login: generate a WhatsApp QR code and wait for linking",
           "- browser: control clawd's dedicated browser",
           "- canvas: present/eval/snapshot the Canvas",
           "- nodes: list/describe/notify/camera/screen on paired nodes",
@@ -219,8 +237,9 @@ export function buildAgentSystemPrompt(params: {
     params.sandboxInfo?.enabled ? "## Sandbox" : "",
     params.sandboxInfo?.enabled
       ? [
-          "Tool execution is isolated in a Docker sandbox.",
+          "You are running in a sandboxed runtime (tools execute in Docker).",
           "Some tools may be unavailable due to sandbox policy.",
+          "Sub-agents stay sandboxed (no elevated/host access). Need outside-sandbox read/write? Don't spawn; ask first.",
           params.sandboxInfo.workspaceDir
             ? `Sandbox workspace: ${params.sandboxInfo.workspaceDir}`
             : "",
@@ -236,6 +255,40 @@ export function buildAgentSystemPrompt(params: {
             : "",
           params.sandboxInfo.browserNoVncUrl
             ? `Sandbox browser observer (noVNC): ${params.sandboxInfo.browserNoVncUrl}`
+            : "",
+          params.sandboxInfo.hostBrowserAllowed === true
+            ? "Host browser control: allowed."
+            : params.sandboxInfo.hostBrowserAllowed === false
+              ? "Host browser control: blocked."
+              : "",
+          params.sandboxInfo.allowedControlUrls?.length
+            ? `Browser control URL allowlist: ${params.sandboxInfo.allowedControlUrls.join(
+                ", ",
+              )}`
+            : "",
+          params.sandboxInfo.allowedControlHosts?.length
+            ? `Browser control host allowlist: ${params.sandboxInfo.allowedControlHosts.join(
+                ", ",
+              )}`
+            : "",
+          params.sandboxInfo.allowedControlPorts?.length
+            ? `Browser control port allowlist: ${params.sandboxInfo.allowedControlPorts.join(
+                ", ",
+              )}`
+            : "",
+          params.sandboxInfo.elevated?.allowed
+            ? "Elevated bash is available for this session."
+            : "",
+          params.sandboxInfo.elevated?.allowed
+            ? "User can toggle with /elevated on|off."
+            : "",
+          params.sandboxInfo.elevated?.allowed
+            ? "You may also send /elevated on|off when needed."
+            : "",
+          params.sandboxInfo.elevated?.allowed
+            ? `Current elevated level: ${
+                params.sandboxInfo.elevated.defaultLevel
+              } (on runs bash on host; off runs in sandbox).`
             : "",
         ]
           .filter(Boolean)
@@ -268,11 +321,12 @@ export function buildAgentSystemPrompt(params: {
           "",
           "### message tool",
           "- Use `message` for proactive sends + provider actions (polls, reactions, etc.).",
-          "- If multiple providers are configured, pass `provider` (whatsapp|telegram|discord|slack|signal|imessage|msteams).",
-          telegramInlineButtonsEnabled
-            ? "- Telegram: inline buttons supported. Use `action=send` with `buttons=[[{text,callback_data}]]` (callback_data routes back as a user message)."
-            : runtimeProvider === "telegram"
-              ? '- Telegram: inline buttons NOT enabled. If you need them, ask to add "inlineButtons" to telegram.capabilities or telegram.accounts.<id>.capabilities.'
+          "- For `action=send`, include `to` and `message`.",
+          `- If multiple providers are configured, pass \`provider\` (${MESSAGE_PROVIDER_OPTIONS}).`,
+          inlineButtonsEnabled
+            ? "- Inline buttons supported. Use `action=send` with `buttons=[[{text,callback_data}]]` (callback_data routes back as a user message)."
+            : runtimeProvider
+              ? `- Inline buttons not enabled for ${runtimeProvider}. If you need them, ask to add "inlineButtons" to ${runtimeProvider}.capabilities or ${runtimeProvider}.accounts.<id>.capabilities.`
               : "",
         ]
           .filter(Boolean)
@@ -343,6 +397,7 @@ export function buildAgentSystemPrompt(params: {
     ]
       .filter(Boolean)
       .join(" | ")}`,
+    `Reasoning: ${reasoningLevel} (hidden unless on/stream). Toggle /reasoning; /status shows Reasoning when enabled.`,
   );
 
   return lines.filter(Boolean).join("\n");

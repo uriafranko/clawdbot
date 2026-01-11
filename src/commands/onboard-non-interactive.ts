@@ -14,7 +14,7 @@ import {
   resolveGatewayPort,
   writeConfigFile,
 } from "../config/config.js";
-import { GATEWAY_LAUNCH_AGENT_LABEL } from "../daemon/constants.js";
+import { resolveGatewayLaunchAgentLabel } from "../daemon/constants.js";
 import { resolveGatewayProgramArguments } from "../daemon/program-args.js";
 import { resolvePreferredNodePath } from "../daemon/runtime-paths.js";
 import { resolveGatewayService } from "../daemon/service.js";
@@ -36,10 +36,14 @@ import {
   applyMinimaxConfig,
   applyMinimaxHostedConfig,
   applyOpencodeZenConfig,
+  applyOpenrouterConfig,
+  applyZaiConfig,
   setAnthropicApiKey,
   setGeminiApiKey,
   setMinimaxApiKey,
   setOpencodeZenApiKey,
+  setOpenrouterApiKey,
+  setZaiApiKey,
 } from "./onboard-auth.js";
 import {
   applyWizardMetadata,
@@ -225,6 +229,25 @@ export async function runNonInteractiveOnboarding(
       mode: "api_key",
     });
     nextConfig = applyGoogleGeminiModelDefault(nextConfig).next;
+  } else if (authChoice === "zai-api-key") {
+    const resolved = await resolveNonInteractiveApiKey({
+      provider: "zai",
+      cfg: baseConfig,
+      flagValue: opts.zaiApiKey,
+      flagName: "--zai-api-key",
+      envVar: "ZAI_API_KEY",
+      runtime,
+    });
+    if (!resolved) return;
+    if (resolved.source !== "profile") {
+      await setZaiApiKey(resolved.key);
+    }
+    nextConfig = applyAuthProfileConfig(nextConfig, {
+      profileId: "zai:default",
+      provider: "zai",
+      mode: "api_key",
+    });
+    nextConfig = applyZaiConfig(nextConfig);
   } else if (authChoice === "openai-api-key") {
     const resolved = await resolveNonInteractiveApiKey({
       provider: "openai",
@@ -243,6 +266,25 @@ export async function runNonInteractiveOnboarding(
     });
     process.env.OPENAI_API_KEY = key;
     runtime.log(`Saved OPENAI_API_KEY to ${result.path}`);
+  } else if (authChoice === "openrouter-api-key") {
+    const resolved = await resolveNonInteractiveApiKey({
+      provider: "openrouter",
+      cfg: baseConfig,
+      flagValue: opts.openrouterApiKey,
+      flagName: "--openrouter-api-key",
+      envVar: "OPENROUTER_API_KEY",
+      runtime,
+    });
+    if (!resolved) return;
+    if (resolved.source !== "profile") {
+      await setOpenrouterApiKey(resolved.key);
+    }
+    nextConfig = applyAuthProfileConfig(nextConfig, {
+      profileId: "openrouter:default",
+      provider: "openrouter",
+      mode: "api_key",
+    });
+    nextConfig = applyOpenrouterConfig(nextConfig);
   } else if (authChoice === "minimax-cloud") {
     const resolved = await resolveNonInteractiveApiKey({
       provider: "minimax",
@@ -316,11 +358,11 @@ export async function runNonInteractiveOnboarding(
     nextConfig = applyMinimaxConfig(nextConfig);
   } else if (authChoice === "opencode-zen") {
     const resolved = await resolveNonInteractiveApiKey({
-      provider: "opencode-zen",
+      provider: "opencode",
       cfg: baseConfig,
       flagValue: opts.opencodeZenApiKey,
       flagName: "--opencode-zen-api-key",
-      envVar: "OPENCODE_ZEN_API_KEY",
+      envVar: "OPENCODE_API_KEY (or OPENCODE_ZEN_API_KEY)",
       runtime,
     });
     if (!resolved) return;
@@ -328,8 +370,8 @@ export async function runNonInteractiveOnboarding(
       await setOpencodeZenApiKey(resolved.key);
     }
     nextConfig = applyAuthProfileConfig(nextConfig, {
-      profileId: "opencode-zen:default",
-      provider: "opencode-zen",
+      profileId: "opencode:default",
+      provider: "opencode",
       mode: "api_key",
     });
     nextConfig = applyOpencodeZenConfig(nextConfig);
@@ -363,7 +405,7 @@ export async function runNonInteractiveOnboarding(
     ? (opts.gatewayPort as number)
     : resolveGatewayPort(baseConfig);
   let bind = opts.gatewayBind ?? "loopback";
-  let authMode = opts.gatewayAuth ?? "off";
+  let authMode = opts.gatewayAuth ?? "token";
   const tailscaleMode = opts.tailscale ?? "off";
   const tailscaleResetOnExit = Boolean(opts.tailscaleResetOnExit);
 
@@ -490,7 +532,7 @@ export async function runNonInteractiveOnboarding(
         token: gatewayToken,
         launchdLabel:
           process.platform === "darwin"
-            ? GATEWAY_LAUNCH_AGENT_LABEL
+            ? resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE)
             : undefined,
       });
       await service.install({

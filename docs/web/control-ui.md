@@ -25,6 +25,7 @@ Auth is supplied during the WebSocket handshake via:
 - `connect.params.auth.token`
 - `connect.params.auth.password`
 The dashboard settings panel lets you store a token; passwords are not persisted.
+The onboarding wizard generates a gateway token by default, so paste it here on first connect.
 
 ## What it can do (today)
 - Chat with the model via Gateway WS (`chat.history`, `chat.send`, `chat.abort`)
@@ -42,6 +43,15 @@ The dashboard settings panel lets you store a token; passwords are not persisted
 - Logs: live tail of gateway file logs with filter/export (`logs.tail`)
 - Update: run a package/git update + restart (`update.run`) with a restart report
 
+## Chat behavior
+
+- `chat.send` is **non-blocking**: it acks immediately with `{ runId, status: "started" }` and the response streams via `chat` events.
+- Re-sending with the same `idempotencyKey` returns `{ status: "in_flight" }` while running, and `{ status: "ok" }` after completion.
+- Stop:
+  - Click **Stop** (calls `chat.abort`)
+  - Type `/stop` (or `stop|esc|abort|wait|exit`) to abort out-of-band
+  - `chat.abort` supports `{ sessionKey }` (no `runId`) to abort all active runs for that session
+
 ## Tailnet access (recommended)
 
 ### Integrated Tailscale Serve (preferred)
@@ -56,9 +66,9 @@ Open:
 - `https://<magicdns>/` (or your configured `gateway.controlUi.basePath`)
 
 By default, the gateway trusts Tailscale identity headers in serve mode. You can still set
-`CLAWDBOT_GATEWAY_TOKEN` or `gateway.auth` if you want a shared secret instead.
+`gateway.auth` (or `CLAWDBOT_GATEWAY_TOKEN`) if you want a shared secret instead.
 
-### Bind to tailnet + token (legacy)
+### Bind to tailnet + token
 
 ```bash
 clawdbot gateway --bind tailnet --token "$(openssl rand -hex 32)"

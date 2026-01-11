@@ -9,6 +9,7 @@ import {
   CODEX_CLI_PROFILE_ID,
   ensureAuthProfileStore,
   listProfilesForProvider,
+  resolveAuthProfileOrder,
   upsertAuthProfile,
 } from "../agents/auth-profiles.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
@@ -44,12 +45,19 @@ import {
   applyMinimaxProviderConfig,
   applyOpencodeZenConfig,
   applyOpencodeZenProviderConfig,
+  applyOpenrouterConfig,
+  applyOpenrouterProviderConfig,
+  applyZaiConfig,
   MINIMAX_HOSTED_MODEL_REF,
+  OPENROUTER_DEFAULT_MODEL_REF,
   setAnthropicApiKey,
   setGeminiApiKey,
   setMinimaxApiKey,
   setOpencodeZenApiKey,
+  setOpenrouterApiKey,
+  setZaiApiKey,
   writeOAuthCredentials,
+  ZAI_DEFAULT_MODEL_REF,
 } from "./onboard-auth.js";
 import { openUrl } from "./onboard-helpers.js";
 import type { AuthChoice } from "./onboard-types.js";
@@ -363,6 +371,77 @@ export async function applyAuthChoice(params: {
       `Saved OPENAI_API_KEY to ${result.path} for launchd compatibility.`,
       "OpenAI API key",
     );
+  } else if (params.authChoice === "openrouter-api-key") {
+    const store = ensureAuthProfileStore(params.agentDir, {
+      allowKeychainPrompt: false,
+    });
+    const profileOrder = resolveAuthProfileOrder({
+      cfg: nextConfig,
+      store,
+      provider: "openrouter",
+    });
+    const existingProfileId = profileOrder.find((profileId) =>
+      Boolean(store.profiles[profileId]),
+    );
+    const existingCred = existingProfileId
+      ? store.profiles[existingProfileId]
+      : undefined;
+    let profileId = "openrouter:default";
+    let mode: "api_key" | "oauth" | "token" = "api_key";
+    let hasCredential = false;
+
+    if (existingProfileId && existingCred?.type) {
+      profileId = existingProfileId;
+      mode =
+        existingCred.type === "oauth"
+          ? "oauth"
+          : existingCred.type === "token"
+            ? "token"
+            : "api_key";
+      hasCredential = true;
+    }
+
+    if (!hasCredential) {
+      const envKey = resolveEnvApiKey("openrouter");
+      if (envKey) {
+        const useExisting = await params.prompter.confirm({
+          message: `Use existing OPENROUTER_API_KEY (${envKey.source})?`,
+          initialValue: true,
+        });
+        if (useExisting) {
+          await setOpenrouterApiKey(envKey.apiKey, params.agentDir);
+          hasCredential = true;
+        }
+      }
+    }
+
+    if (!hasCredential) {
+      const key = await params.prompter.text({
+        message: "Enter OpenRouter API key",
+        validate: (value) => (value?.trim() ? undefined : "Required"),
+      });
+      await setOpenrouterApiKey(String(key).trim(), params.agentDir);
+      hasCredential = true;
+    }
+
+    if (hasCredential) {
+      nextConfig = applyAuthProfileConfig(nextConfig, {
+        profileId,
+        provider: "openrouter",
+        mode,
+      });
+    }
+    if (params.setDefaultModel) {
+      nextConfig = applyOpenrouterConfig(nextConfig);
+      await params.prompter.note(
+        `Default model set to ${OPENROUTER_DEFAULT_MODEL_REF}`,
+        "Model configured",
+      );
+    } else {
+      nextConfig = applyOpenrouterProviderConfig(nextConfig);
+      agentModelOverride = OPENROUTER_DEFAULT_MODEL_REF;
+      await noteAgentModel(OPENROUTER_DEFAULT_MODEL_REF);
+    }
   } else if (params.authChoice === "openai-codex") {
     const isRemote = isRemoteEnvironment();
     await params.prompter.note(
@@ -598,6 +677,45 @@ export async function applyAuthChoice(params: {
       agentModelOverride = GOOGLE_GEMINI_DEFAULT_MODEL;
       await noteAgentModel(GOOGLE_GEMINI_DEFAULT_MODEL);
     }
+  } else if (params.authChoice === "zai-api-key") {
+    const key = await params.prompter.text({
+      message: "Enter Z.AI API key",
+      validate: (value) => (value?.trim() ? undefined : "Required"),
+    });
+    await setZaiApiKey(String(key).trim(), params.agentDir);
+    nextConfig = applyAuthProfileConfig(nextConfig, {
+      profileId: "zai:default",
+      provider: "zai",
+      mode: "api_key",
+    });
+    if (params.setDefaultModel) {
+      nextConfig = applyZaiConfig(nextConfig);
+      await params.prompter.note(
+        `Default model set to ${ZAI_DEFAULT_MODEL_REF}`,
+        "Model configured",
+      );
+    } else {
+      nextConfig = {
+        ...nextConfig,
+        agents: {
+          ...nextConfig.agents,
+          defaults: {
+            ...nextConfig.agents?.defaults,
+            models: {
+              ...nextConfig.agents?.defaults?.models,
+              [ZAI_DEFAULT_MODEL_REF]: {
+                ...nextConfig.agents?.defaults?.models?.[ZAI_DEFAULT_MODEL_REF],
+                alias:
+                  nextConfig.agents?.defaults?.models?.[ZAI_DEFAULT_MODEL_REF]
+                    ?.alias ?? "GLM",
+              },
+            },
+          },
+        },
+      };
+      agentModelOverride = ZAI_DEFAULT_MODEL_REF;
+      await noteAgentModel(ZAI_DEFAULT_MODEL_REF);
+    }
   } else if (params.authChoice === "apiKey") {
     const key = await params.prompter.text({
       message: "Enter Anthropic API key",
@@ -668,8 +786,8 @@ export async function applyAuthChoice(params: {
     });
     await setOpencodeZenApiKey(String(key).trim(), params.agentDir);
     nextConfig = applyAuthProfileConfig(nextConfig, {
-      profileId: "opencode-zen:default",
-      provider: "opencode-zen",
+      profileId: "opencode:default",
+      provider: "opencode",
       mode: "api_key",
     });
     if (params.setDefaultModel) {
@@ -686,4 +804,39 @@ export async function applyAuthChoice(params: {
   }
 
   return { config: nextConfig, agentModelOverride };
+}
+
+export function resolvePreferredProviderForAuthChoice(
+  choice: AuthChoice,
+): string | undefined {
+  switch (choice) {
+    case "oauth":
+    case "setup-token":
+    case "claude-cli":
+    case "token":
+    case "apiKey":
+      return "anthropic";
+    case "openai-codex":
+    case "codex-cli":
+      return "openai-codex";
+    case "openai-api-key":
+      return "openai";
+    case "openrouter-api-key":
+      return "openrouter";
+    case "gemini-api-key":
+      return "google";
+    case "zai-api-key":
+      return "zai";
+    case "antigravity":
+      return "google-antigravity";
+    case "minimax-cloud":
+    case "minimax-api":
+      return "minimax";
+    case "minimax":
+      return "lmstudio";
+    case "opencode-zen":
+      return "opencode";
+    default:
+      return undefined;
+  }
 }

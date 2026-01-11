@@ -15,7 +15,10 @@ import {
   isEmbeddedPiRunStreaming,
   resolveEmbeddedSessionLane,
 } from "../agents/pi-embedded.js";
-import { ensureSandboxWorkspaceForSession } from "../agents/sandbox.js";
+import {
+  ensureSandboxWorkspaceForSession,
+  resolveSandboxRuntimeStatus,
+} from "../agents/sandbox.js";
 import { resolveAgentTimeoutMs } from "../agents/timeout.js";
 import {
   DEFAULT_AGENT_WORKSPACE_DIR,
@@ -29,8 +32,14 @@ import {
 import { resolveSessionFilePath } from "../config/sessions.js";
 import { logVerbose } from "../globals.js";
 import { clearCommandLane, getQueueSize } from "../process/command-queue.js";
+import { getProviderDock } from "../providers/dock.js";
+import {
+  CHAT_PROVIDER_ORDER,
+  normalizeProviderId,
+} from "../providers/registry.js";
 import { normalizeMainKey } from "../routing/session-key.js";
 import { defaultRuntime } from "../runtime.js";
+import { INTERNAL_MESSAGE_PROVIDER } from "../utils/message-provider.js";
 import { resolveCommandAuthorization } from "./command-auth.js";
 import { hasControlCommand } from "./command-detection.js";
 import {
@@ -60,7 +69,11 @@ import {
   defaultGroupActivation,
   resolveGroupRequireMention,
 } from "./reply/groups.js";
-import { stripMentions, stripStructuralPrefixes } from "./reply/mentions.js";
+import {
+  CURRENT_MESSAGE_MARKER,
+  stripMentions,
+  stripStructuralPrefixes,
+} from "./reply/mentions.js";
 import {
   createModelSelectionState,
   resolveContextTokens,
@@ -85,7 +98,11 @@ import {
   type VerboseLevel,
 } from "./thinking.js";
 import { SILENT_REPLY_TOKEN } from "./tokens.js";
-import { isAudio, transcribeInboundAudio } from "./transcription.js";
+import {
+  hasAudioTranscriptionConfig,
+  isAudio,
+  transcribeInboundAudio,
+} from "./transcription.js";
 import type { GetReplyOptions, ReplyPayload } from "./types.js";
 
 export {
@@ -116,53 +133,41 @@ function slugAllowToken(value?: string) {
   return text.replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
 }
 
+const SENDER_PREFIXES = [
+  ...CHAT_PROVIDER_ORDER,
+  INTERNAL_MESSAGE_PROVIDER,
+  "user",
+  "group",
+  "channel",
+];
+const SENDER_PREFIX_RE = new RegExp(`^(${SENDER_PREFIXES.join("|")}):`, "i");
+
 function stripSenderPrefix(value?: string) {
   if (!value) return "";
   const trimmed = value.trim();
-  return trimmed.replace(
-    /^(whatsapp|telegram|discord|signal|imessage|webchat|user|group|channel):/i,
-    "",
-  );
+  return trimmed.replace(SENDER_PREFIX_RE, "");
 }
 
 function resolveElevatedAllowList(
   allowFrom: AgentElevatedAllowFromConfig | undefined,
   provider: string,
-  discordFallback?: Array<string | number>,
+  fallbackAllowFrom?: Array<string | number>,
 ): Array<string | number> | undefined {
-  switch (provider) {
-    case "whatsapp":
-      return allowFrom?.whatsapp;
-    case "telegram":
-      return allowFrom?.telegram;
-    case "discord": {
-      const hasExplicit = Boolean(
-        allowFrom && Object.hasOwn(allowFrom, "discord"),
-      );
-      if (hasExplicit) return allowFrom?.discord;
-      return discordFallback;
-    }
-    case "signal":
-      return allowFrom?.signal;
-    case "imessage":
-      return allowFrom?.imessage;
-    case "webchat":
-      return allowFrom?.webchat;
-    default:
-      return undefined;
-  }
+  if (!allowFrom) return fallbackAllowFrom;
+  const value = allowFrom[provider];
+  return Array.isArray(value) ? value : fallbackAllowFrom;
 }
 
 function isApprovedElevatedSender(params: {
   provider: string;
   ctx: MsgContext;
   allowFrom?: AgentElevatedAllowFromConfig;
-  discordFallback?: Array<string | number>;
+  fallbackAllowFrom?: Array<string | number>;
 }): boolean {
   const rawAllow = resolveElevatedAllowList(
     params.allowFrom,
     params.provider,
-    params.discordFallback,
+    params.fallbackAllowFrom,
   );
   if (!rawAllow || rawAllow.length === 0) return false;
 
@@ -212,36 +217,99 @@ function resolveElevatedPermissions(params: {
   agentId: string;
   ctx: MsgContext;
   provider: string;
-}): { enabled: boolean; allowed: boolean } {
+}): {
+  enabled: boolean;
+  allowed: boolean;
+  failures: Array<{ gate: string; key: string }>;
+} {
   const globalConfig = params.cfg.tools?.elevated;
   const agentConfig = resolveAgentConfig(params.cfg, params.agentId)?.tools
     ?.elevated;
   const globalEnabled = globalConfig?.enabled !== false;
   const agentEnabled = agentConfig?.enabled !== false;
   const enabled = globalEnabled && agentEnabled;
-  if (!enabled) return { enabled, allowed: false };
-  if (!params.provider) return { enabled, allowed: false };
+  const failures: Array<{ gate: string; key: string }> = [];
+  if (!globalEnabled)
+    failures.push({ gate: "enabled", key: "tools.elevated.enabled" });
+  if (!agentEnabled)
+    failures.push({
+      gate: "enabled",
+      key: "agents.list[].tools.elevated.enabled",
+    });
+  if (!enabled) return { enabled, allowed: false, failures };
+  if (!params.provider) {
+    failures.push({ gate: "provider", key: "ctx.Provider" });
+    return { enabled, allowed: false, failures };
+  }
 
-  const discordFallback =
-    params.provider === "discord"
-      ? params.cfg.discord?.dm?.allowFrom
-      : undefined;
+  const normalizedProvider = normalizeProviderId(params.provider);
+  const dockFallbackAllowFrom = normalizedProvider
+    ? getProviderDock(normalizedProvider)?.elevated?.allowFromFallback?.({
+        cfg: params.cfg,
+        accountId: params.ctx.AccountId,
+      })
+    : undefined;
+  const fallbackAllowFrom = dockFallbackAllowFrom;
   const globalAllowed = isApprovedElevatedSender({
     provider: params.provider,
     ctx: params.ctx,
     allowFrom: globalConfig?.allowFrom,
-    discordFallback,
+    fallbackAllowFrom,
   });
-  if (!globalAllowed) return { enabled, allowed: false };
+  if (!globalAllowed) {
+    failures.push({
+      gate: "allowFrom",
+      key: `tools.elevated.allowFrom.${params.provider}`,
+    });
+    return { enabled, allowed: false, failures };
+  }
 
   const agentAllowed = agentConfig?.allowFrom
     ? isApprovedElevatedSender({
         provider: params.provider,
         ctx: params.ctx,
         allowFrom: agentConfig.allowFrom,
+        fallbackAllowFrom,
       })
     : true;
-  return { enabled, allowed: globalAllowed && agentAllowed };
+  if (!agentAllowed) {
+    failures.push({
+      gate: "allowFrom",
+      key: `agents.list[].tools.elevated.allowFrom.${params.provider}`,
+    });
+  }
+  return { enabled, allowed: globalAllowed && agentAllowed, failures };
+}
+
+function formatElevatedUnavailableMessage(params: {
+  runtimeSandboxed: boolean;
+  failures: Array<{ gate: string; key: string }>;
+  sessionKey?: string;
+}): string {
+  const lines: string[] = [];
+  lines.push(
+    `elevated is not available right now (runtime=${params.runtimeSandboxed ? "sandboxed" : "direct"}).`,
+  );
+  if (params.failures.length > 0) {
+    lines.push(
+      `Failing gates: ${params.failures
+        .map((f) => `${f.gate} (${f.key})`)
+        .join(", ")}`,
+    );
+  } else {
+    lines.push(
+      "Failing gates: enabled (tools.elevated.enabled / agents.list[].tools.elevated.enabled), allowFrom (tools.elevated.allowFrom.<provider>).",
+    );
+  }
+  lines.push("Fix-it keys:");
+  lines.push("- tools.elevated.enabled");
+  lines.push("- tools.elevated.allowFrom.<provider>");
+  lines.push("- agents.list[].tools.elevated.enabled");
+  lines.push("- agents.list[].tools.elevated.allowFrom.<provider>");
+  if (params.sessionKey) {
+    lines.push(`See: clawdbot sandbox explain --session ${params.sessionKey}`);
+  }
+  return lines.join("\n");
 }
 
 export async function getReplyFromConfig(
@@ -299,7 +367,7 @@ export async function getReplyFromConfig(
   opts?.onTypingController?.(typing);
 
   let transcribedText: string | undefined;
-  if (cfg.audio?.transcription && isAudio(ctx.MediaType)) {
+  if (hasAudioTranscriptionConfig(cfg) && isAudio(ctx.MediaType)) {
     const transcribed = await transcribeInboundAudio(cfg, ctx, defaultRuntime);
     if (transcribed?.text) {
       transcribedText = transcribed.text;
@@ -336,7 +404,14 @@ export async function getReplyFromConfig(
     triggerBodyNormalized,
   } = sessionState;
 
-  const rawBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
+  // Prefer CommandBody/RawBody (clean message without structural context) for directive parsing.
+  // Keep `Body`/`BodyStripped` as the best-available prompt text (may include context).
+  const commandSource =
+    sessionCtx.CommandBody ??
+    sessionCtx.RawBody ??
+    sessionCtx.BodyStripped ??
+    sessionCtx.Body ??
+    "";
   const clearInlineDirectives = (cleaned: string): InlineDirectives => ({
     cleaned,
     hasThinkDirective: false,
@@ -375,7 +450,7 @@ export async function getReplyFromConfig(
     .map((entry) => entry.alias?.trim())
     .filter((alias): alias is string => Boolean(alias))
     .filter((alias) => !reservedCommands.has(alias.toLowerCase()));
-  let parsedDirectives = parseInlineDirectives(rawBody, {
+  let parsedDirectives = parseInlineDirectives(commandSource, {
     modelAliases: configuredAliases,
   });
   if (
@@ -426,26 +501,67 @@ export async function getReplyFromConfig(
         hasQueueDirective: false,
         queueReset: false,
       };
-  sessionCtx.Body = parsedDirectives.cleaned;
-  sessionCtx.BodyStripped = parsedDirectives.cleaned;
+  const existingBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
+  const cleanedBody = (() => {
+    if (!existingBody) return parsedDirectives.cleaned;
+    if (!sessionCtx.CommandBody && !sessionCtx.RawBody) {
+      return parseInlineDirectives(existingBody, {
+        modelAliases: configuredAliases,
+      }).cleaned;
+    }
+
+    const markerIndex = existingBody.indexOf(CURRENT_MESSAGE_MARKER);
+    if (markerIndex < 0) {
+      return parseInlineDirectives(existingBody, {
+        modelAliases: configuredAliases,
+      }).cleaned;
+    }
+
+    const head = existingBody.slice(
+      0,
+      markerIndex + CURRENT_MESSAGE_MARKER.length,
+    );
+    const tail = existingBody.slice(
+      markerIndex + CURRENT_MESSAGE_MARKER.length,
+    );
+    const cleanedTail = parseInlineDirectives(tail, {
+      modelAliases: configuredAliases,
+    }).cleaned;
+    return `${head}${cleanedTail}`;
+  })();
+
+  sessionCtx.Body = cleanedBody;
+  sessionCtx.BodyStripped = cleanedBody;
 
   const messageProviderKey =
     sessionCtx.Provider?.trim().toLowerCase() ??
     ctx.Provider?.trim().toLowerCase() ??
     "";
-  const { enabled: elevatedEnabled, allowed: elevatedAllowed } =
-    resolveElevatedPermissions({
-      cfg,
-      agentId,
-      ctx,
-      provider: messageProviderKey,
-    });
+  const elevated = resolveElevatedPermissions({
+    cfg,
+    agentId,
+    ctx,
+    provider: messageProviderKey,
+  });
+  const elevatedEnabled = elevated.enabled;
+  const elevatedAllowed = elevated.allowed;
+  const elevatedFailures = elevated.failures;
   if (
     directives.hasElevatedDirective &&
     (!elevatedEnabled || !elevatedAllowed)
   ) {
     typing.cleanup();
-    return { text: "elevated is not available right now." };
+    const runtimeSandboxed = resolveSandboxRuntimeStatus({
+      cfg,
+      sessionKey: ctx.SessionKey,
+    }).sandboxed;
+    return {
+      text: formatElevatedUnavailableMessage({
+        runtimeSandboxed,
+        failures: elevatedFailures,
+        sessionKey: ctx.SessionKey,
+      }),
+    };
   }
 
   const requireMention = resolveGroupRequireMention({
@@ -473,8 +589,6 @@ export async function getReplyFromConfig(
       (agentCfg?.elevatedDefault as ElevatedLevel | undefined) ??
       "on")
     : "off";
-  const providerKey = sessionCtx.Provider?.trim().toLowerCase();
-  const explicitBlockStreamingEnable = opts?.disableBlockStreaming === false;
   const resolvedBlockStreaming =
     opts?.disableBlockStreaming === true
       ? "off"
@@ -487,12 +601,8 @@ export async function getReplyFromConfig(
     agentCfg?.blockStreamingBreak === "message_end"
       ? "message_end"
       : "text_end";
-  const allowBlockStreaming =
-    providerKey === "telegram" || explicitBlockStreamingEnable;
   const blockStreamingEnabled =
-    resolvedBlockStreaming === "on" &&
-    opts?.disableBlockStreaming !== true &&
-    allowBlockStreaming;
+    resolvedBlockStreaming === "on" && opts?.disableBlockStreaming !== true;
   const blockReplyChunking = blockStreamingEnabled
     ? resolveBlockStreamingChunking(
         cfg,
@@ -581,6 +691,8 @@ export async function getReplyFromConfig(
       storePath,
       elevatedEnabled,
       elevatedAllowed,
+      elevatedFailures,
+      messageProviderKey,
       defaultProvider,
       defaultModel,
       aliasIndex,
@@ -667,8 +779,13 @@ export async function getReplyFromConfig(
       : undefined;
 
   const isEmptyConfig = Object.keys(cfg).length === 0;
+  const skipWhenConfigEmpty = command.providerId
+    ? Boolean(
+        getProviderDock(command.providerId)?.commands?.skipWhenConfigEmpty,
+      )
+    : false;
   if (
-    command.isWhatsAppProvider &&
+    skipWhenConfigEmpty &&
     isEmptyConfig &&
     command.from &&
     command.to &&
@@ -739,6 +856,7 @@ export async function getReplyFromConfig(
   );
   const groupIntro = shouldInjectGroupIntro
     ? buildGroupIntro({
+        cfg,
         sessionCtx,
         sessionEntry,
         defaultActivation,
@@ -750,13 +868,19 @@ export async function getReplyFromConfig(
     .filter(Boolean)
     .join("\n\n");
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
-  const rawBodyTrimmed = (ctx.Body ?? "").trim();
+  // Use CommandBody/RawBody for bare reset detection (clean message without structural context).
+  const rawBodyTrimmed = (
+    ctx.CommandBody ??
+    ctx.RawBody ??
+    ctx.Body ??
+    ""
+  ).trim();
   const baseBodyTrimmedRaw = baseBody.trim();
   if (
     allowTextCommands &&
     !commandAuthorized &&
     !baseBodyTrimmedRaw &&
-    hasControlCommand(rawBody)
+    hasControlCommand(commandSource, cfg)
   ) {
     typing.cleanup();
     return undefined;
@@ -826,18 +950,18 @@ export async function getReplyFromConfig(
   const mediaReplyHint = mediaNote
     ? "To send an image back, add a line like: MEDIA:https://example.com/image.jpg (no spaces). Keep caption in the text body."
     : undefined;
-  let commandBody = mediaNote
+  let prefixedCommandBody = mediaNote
     ? [mediaNote, mediaReplyHint, prefixedBody ?? ""]
         .filter(Boolean)
         .join("\n")
         .trim()
     : prefixedBody;
-  if (!resolvedThinkLevel && commandBody) {
-    const parts = commandBody.split(/\s+/);
+  if (!resolvedThinkLevel && prefixedCommandBody) {
+    const parts = prefixedCommandBody.split(/\s+/);
     const maybeLevel = normalizeThinkLevel(parts[0]);
     if (maybeLevel) {
       resolvedThinkLevel = maybeLevel;
-      commandBody = parts.slice(1).join(" ").trim();
+      prefixedCommandBody = parts.slice(1).join(" ").trim();
     }
   }
   if (!resolvedThinkLevel) {
@@ -931,7 +1055,7 @@ export async function getReplyFromConfig(
   }
 
   return runReplyAgent({
-    commandBody,
+    commandBody: prefixedCommandBody,
     followupRun,
     queueKey,
     resolvedQueue,
